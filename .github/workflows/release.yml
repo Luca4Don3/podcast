@@ -70,6 +70,7 @@ jobs:
 
   server-macos:
     name: Server macOS (optional)
+    if: ${{ github.event_name == 'push' }}
     runs-on: macos-latest
     continue-on-error: true
     steps:
