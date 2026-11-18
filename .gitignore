@@ -1,0 +1,43 @@
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# C++
+server-cpp/build/
+
+# Go
+server/bin/
+server/data/
+*.db
+*.db-wal
+*.db-shm
+
+# 环境与密钥
+.env
+deploy/server.env
+.temp/
+
+# 系统
+.DS_Store
+Thumbs.db
+    28
+(shown up to 2000 lines; use startLine/endLine to page)
+# Generated files and local secrets
+dist/
+android/.kotlin/
+android/app/.cxx/
+__pycache__/
+*.pyc
+*.tmp
+*.pem
+*.p12
+.env.*
+!.env.example

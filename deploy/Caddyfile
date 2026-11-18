@@ -1,0 +1,27 @@
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	# 仅放行 API 与健康检查，避免把后端当作静态站点
+	handle /api/* {
+		reverse_proxy api:8080
+	}
+	handle /healthz {
+		reverse_proxy api:8080
+	}
+	handle {
+		respond "PodcastApp API" 200
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

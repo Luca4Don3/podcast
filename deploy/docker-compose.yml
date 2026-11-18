@@ -1,0 +1,51 @@
+# 二选一：默认用 C++ 后端（镜像更小），把 build.context 改成 ../server 即可切回 Go 版
+services:
+  api:
+    build:
+      context: ../server-cpp
+    image: podcastapp/server-cpp:latest
+    container_name: podcast-api
+    restart: unless-stopped
+    env_file:
+      - ./server.env
+    environment:
+      APP_ADDR: ":8080"
+      APP_ENV: production
+      APP_DATA_DIR: /data
+    volumes:
+      - podcast-data:/data
+    ports:
+      # 仅监听本机，由 Caddy 反代；直接暴露公网可改为 "8080:8080"
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [podcast]
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: podcast-caddy
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:-podcast.example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [podcast]
+
+volumes:
+  podcast-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  podcast:
+    driver: bridge
