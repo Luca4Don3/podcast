@@ -69,8 +69,8 @@ jobs:
           if-no-files-found: error
 
   server-macos:
-    name: Server macOS x86_64
-    runs-on: macos-13
+    name: Server macOS
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - run: brew install openssl@3 sqlite cmake
