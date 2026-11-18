@@ -201,5 +201,6 @@ python3 tests/content_scope_smoke.py server-cpp/build/podcast-server server/bin/
 - [v1.4.1 测试版](https://github.com/Luca4Don3/podcast/releases/tag/v1.4.1) · [podcast-1.4.1.apk](https://github.com/Luca4Don3/podcast/releases/download/v1.4.1/podcast-1.4.1.apk) · [SHA-256](https://github.com/Luca4Don3/podcast/releases/download/v1.4.1/SHA256SUMS)
 - 测试包支持 **Android 7.0（API 24）及以上**，包含 ARM 和 x86 的 32／64 位变体。测试包使用调试签名，不作为正式商店发行件。
 - C++ 后端默认从源码或 Docker 构建。只读 NAS 和 HTTPS WebDAV 的配置见[文件音源指南](<docs/FILE_MEDIA.md>)，服务器地址导入见[服务器配置](<docs/SERVER_SETUP.md>)。
+- 推送形如 `v1.4.2` 的 tag 后，GitHub Actions 会同时构建 Android 手机／平板通用包与四种 ABI 包，以及 Linux、macOS、Windows 的自托管后端，并上传到该 Release。**桌面端和 iOS 客户端目前尚未实现**，因此暂不生成这两类安装包。
 
 本仓库不提交真实服务器地址、凭据、用户数据库、签名密钥或构建缓存。请自行选择可信的 HTTPS 服务并替换示例密钥。
