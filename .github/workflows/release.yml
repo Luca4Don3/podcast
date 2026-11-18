@@ -69,8 +69,8 @@ jobs:
           if-no-files-found: error
 
   server-macos:
-    name: Server macOS arm64
-    runs-on: macos-14
+    name: Server macOS x86_64
+    runs-on: macos-13
     steps:
       - uses: actions/checkout@v4
       - run: brew install openssl@3 sqlite cmake
@@ -82,7 +82,7 @@ jobs:
           ctest --test-dir build --output-on-failure
       - run: |
           mkdir -p out
-          cp build/podcast-server out/podcast-server-macos-arm64
+          cp build/podcast-server out/podcast-server-macos-x86_64
           shasum -a 256 out/* > out/SHA256SUMS-macos
       - uses: actions/upload-artifact@v4
         with:
