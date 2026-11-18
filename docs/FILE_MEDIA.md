@@ -26,3 +26,9 @@ C++ 构建时启用 PODCAST_ENABLE_WEBDAV=ON，需要 libcurl 7.62+ 和 libxml2 
 
 - Linux x86_64 测试二进制需 glibc 2.38+、GLIBCXX_3.4.31、OpenSSL 3 和 SQLite 共享库；WebDAV 版还需 libcurl 与 libxml2。其他系统（包括 ARM NAS）请用本机编译或按 [Dockerfile](<../server-cpp/Dockerfile>) 为目标架构构建，不直接运行 x86_64 测试件。
 - 后端已以 WebDAV 开启和关闭两种方式构建；验证了 HTTPS 回环连接、鉴权、目录、定长 Range 与拒绝错误上游响应。只读目录黑盒测试覆盖账号隔离、Unicode、HEAD、206/416、64 MiB 文件尾部读取及票据重启失效。未对真实 NAS、网盘或手机做联调，未部署或重启现有服务。
+
+## 平台构建现状
+
+- Android 手机与平板共用同一包，已验证通过 GitHub Actions 构建并导出通用包及四种 ABI 包。
+- 自托管后端：Linux x86_64 在 CI 中构建成功。macOS 与 Windows 后端尚无成功构建记录：macOS 因托管 runner 容量不足被取消，Windows 存在 POSIX 时间与 socket API 依赖，尚未完成移植。
+- Linux、Windows、macOS、iOS 的**客户端**尚无源码。仓库当前只提供 Android 客户端；请勿把服务器二进制当作桌面客户端。

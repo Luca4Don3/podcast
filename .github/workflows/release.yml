@@ -69,8 +69,9 @@ jobs:
           if-no-files-found: error
 
   server-macos:
-    name: Server macOS
+    name: Server macOS (optional)
     runs-on: macos-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - run: brew install openssl@3 sqlite cmake
@@ -91,8 +92,9 @@ jobs:
           if-no-files-found: error
 
   server-windows:
-    name: Server Windows x86_64
+    name: Server Windows (optional)
     runs-on: windows-latest
+    continue-on-error: true
     defaults:
       run:
         shell: msys2 {0}
@@ -124,7 +126,7 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [android, server-linux, server-macos, server-windows]
+    needs: [android, server-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -159,7 +161,11 @@ jobs:
         run: |
           version=$(cat version.txt)
           tag="v$version"
-          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" \
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::warning::Release $tag already exists; refusing to overwrite published assets. Bump podcastVersion to publish a new release."
+            exit 0
+          fi
+          gh release create "$tag" \
             --title "podcast $version" \
-            --notes "Android phone and tablet APKs plus self-hosted server binaries for Linux, macOS and Windows. Desktop and iOS clients are not part of this build."
-          gh release upload "$tag" assets/* --clobber
+            --notes "Android phone/tablet APK (CI debug signing) and Linux x86_64 server binary. Desktop and iOS clients are not implemented yet."
+          gh release upload "$tag" assets/*
