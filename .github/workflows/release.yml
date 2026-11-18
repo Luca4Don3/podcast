@@ -145,7 +145,8 @@ jobs:
           seen = set()
           for apk in sorted(pathlib.Path("artifacts/android").rglob("podcast-*.apk")):
               abi = apk.parent.name
-              name = f"podcast-{version}-{abi}.apk" if abi not in ("android", "compact") else f"podcast-{version}.apk"
+              universal = abi in ("android", "compact", version)
+              name = f"podcast-{version}.apk" if universal else f"podcast-{version}-{abi}.apk"
               if name in seen:
                   continue
               seen.add(name)
