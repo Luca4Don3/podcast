@@ -10,7 +10,7 @@ int main() {
     auto add = [&](const char* id, std::int64_t t) {
         Episode e; e.id = id; e.feed_id = "f1"; e.published_at = t; eps.push_back(e);
     };
-    add("a", 100); add("b", 300); add("c", 200); add("dup", 300);
+    add("a", 100); add("b", 300); add("c", 200); add("b", 300); // repeated id
     Episode other; other.id = "x"; other.feed_id = "f2"; other.published_at = 999; eps.push_back(other);
     auto plan = plan_episodes(eps, "f1", CachePolicy::all);
     CHECK(plan.size() == 3); // duplicates removed
