@@ -15,8 +15,12 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import com.podcastapp.data.filemedia.FileMediaPlayback
 import com.podcastapp.data.filemedia.FileStreamFactory
 import com.podcastapp.data.feed.LocalPodcastLibrary
+import com.podcastapp.data.feed.SourceCredentials
+import com.podcastapp.data.feed.SourceTransport
 import com.podcastapp.data.remote.EpisodeDto
 import com.podcastapp.data.remote.StationDto
+import com.podcastapp.data.storage.StorageMedia
+import com.podcastapp.data.storage.StorageStreamFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -63,7 +67,10 @@ internal fun playbackToggle(state: Int, playWhenReady: Boolean): PlaybackToggle 
 }
 
 private const val FILE_MEDIA_PREFIX = "filemedia:"
+private const val STORAGE_MEDIA_PREFIX = "storage:"
 private fun String?.isFileId() = this?.startsWith(FILE_MEDIA_PREFIX) == true
+private fun String?.isStorageId() = this?.startsWith(STORAGE_MEDIA_PREFIX) == true
+private fun String?.isFileOrStorageId() = isFileId() || isStorageId()
 
 private const val UI_TICK_MS = 1_000L
 private const val PROGRESS_SYNC_MS = 5_000L
@@ -74,7 +81,7 @@ internal fun playbackTickDelayMs(playingPodcast: Boolean, hasUi: Boolean, untilS
 internal data class ProgressCheckpoint(val episodeId: String, val positionMs: Long, val durationMs: Long, val completed: Boolean)
 
 internal fun progressCheckpoint(mediaId: String?, positionMs: Long, durationMs: Long, completed: Boolean): ProgressCheckpoint? =
-    mediaId?.takeUnless { it.startsWith("station:") || it.isFileId() || durationMs <= 0 }?.let {
+    mediaId?.takeUnless { it.startsWith("station:") || it.isFileOrStorageId() || durationMs <= 0 }?.let {
         ProgressCheckpoint(it, if (completed) durationMs else positionMs.coerceIn(0, durationMs), durationMs, completed)
     }
 
@@ -97,6 +104,7 @@ object PlaybackHolder {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var podcastSpeed = 1f
     private var fileStreamFactory: FileStreamFactory? = null
+    private var storageStreamFactory: StorageStreamFactory? = null
     private var ticker: Job? = null
     private var hasUi = false
     private var syncAtMs: Long? = null
@@ -231,6 +239,7 @@ object PlaybackHolder {
             )
             .build()
         checkpoint()
+        clearStorageStream()
         _queue.value = emptyList()
         _isLive.value = true
         _lastError.value = null
@@ -278,10 +287,57 @@ object PlaybackHolder {
         exo.play()
     }
 
+    /**
+     * 播放网络存储中的音频。真实 URL、认证头与 TLS 材料只留在 [StorageStreamFactory] 内部，
+     * MediaItem / MediaSession 只持有 storage: 占位 URI；与文件音源一样不写播客进度。
+     */
+    @OptIn(UnstableApi::class)
+    internal fun playStorage(
+        context: Context,
+        media: StorageMedia,
+        credentials: SourceCredentials,
+        transport: SourceTransport,
+    ) {
+        init(context)
+        val exo = player ?: return
+        val itemId = STORAGE_MEDIA_PREFIX + UUID.randomUUID().toString()
+        val mediaUri = Uri.parse(itemId)
+        val factory = StorageStreamFactory(media.url, mediaUri, credentials, transport)
+        val title = media.title.ifBlank { "未命名音源" }
+        val item = MediaItem.Builder()
+            .setMediaId(itemId)
+            .setUri(mediaUri)
+            .setMimeType(media.mime?.takeIf { it.isNotBlank() && it.startsWith("audio/", ignoreCase = true) })
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(title).setArtist("网络存储")
+                .setIsBrowsable(false).setIsPlayable(true).build())
+            .build()
+        val source = ProgressiveMediaSource.Factory(factory).createMediaSource(item)
+
+        ensureServiceRunning(context)
+        checkpoint()
+        clearFilePlayback()
+        _queue.value = emptyList()
+        _isLive.value = false
+        _lastError.value = null
+        exo.setPlaybackSpeed(podcastSpeed)
+        exo.setMediaSource(source, 0L)
+        storageStreamFactory = factory
+        _nowPlaying.value = NowPlaying(podcastTitle = "网络存储", file = NowPlayingFile(itemId, title))
+        exo.prepare()
+        exo.play()
+    }
+
     private fun clearFilePlayback() {
         fileStreamFactory?.cancel()
         fileStreamFactory = null
+        clearStorageStream()
         if (_nowPlaying.value.file != null) _nowPlaying.value = NowPlaying()
+    }
+
+    /** 只取消网络存储流，不改动当前 UI 状态；切换来源时由新的播放流程重建信息。 */
+    private fun clearStorageStream() {
+        storageStreamFactory?.cancel()
+        storageStreamFactory = null
     }
 
     /** 当前播放的是否为直播流（直播不显示进度条）。 */
@@ -295,6 +351,7 @@ object PlaybackHolder {
         ensureServiceRunning(context)
         _isLive.value = false
         _lastError.value = null
+        clearStorageStream()
         val items = queue.ifEmpty { listOf(episode) }
         if (exo.currentMediaItem?.mediaId != episode.id ||
             _nowPlaying.value.episode?.audioUrl != episode.audioUrl) {
@@ -402,32 +459,33 @@ object PlaybackHolder {
 
     private fun isLiveMedia(p: Player): Boolean =
         p.currentMediaItem?.mediaId?.startsWith("station:") == true ||
-            (!p.currentMediaItem?.mediaId.isFileId() && p.isCurrentMediaItemLive)
+            (!p.currentMediaItem?.mediaId.isFileOrStorageId() && p.isCurrentMediaItemLive)
 
     private fun isPlayingOnDemand(p: Player?): Boolean =
         p != null && p.isPlaying && p.currentMediaItem != null && !isLiveMedia(p)
 
     // 文件点播只在 UI 可见时刷新进度条；不为它安排本地检查点。
     private fun updateTicker(restart: Boolean = false) {
-        val file = player?.currentMediaItem?.mediaId.isFileId()
-        if (!isPlayingOnDemand(player) || (file && !hasUi)) {
+        val fileLike = player?.currentMediaItem?.mediaId.isFileOrStorageId() == true
+        if (!isPlayingOnDemand(player) || (fileLike && !hasUi)) {
             ticker?.cancel()
             ticker = null
             syncAtMs = null
             return
         }
-        if (!restart && ticker?.isActive == true && file == (syncAtMs == null)) return
+        if (!restart && ticker?.isActive == true && fileLike == (syncAtMs == null)) return
         ticker?.cancel()
-        syncAtMs = if (file) null else syncAtMs ?: SystemClock.elapsedRealtime() + PROGRESS_SYNC_MS
+        syncAtMs = if (fileLike) null else syncAtMs ?: SystemClock.elapsedRealtime() + PROGRESS_SYNC_MS
         ticker = scope.launch {
             while (true) {
                 val p = player ?: break
-                val waitMs = if (file) UI_TICK_MS else {
+                val waitMs = if (fileLike) UI_TICK_MS else {
                     val remaining = (syncAtMs ?: break) - SystemClock.elapsedRealtime()
                     playbackTickDelayMs(isPlayingOnDemand(p), hasUi, remaining) ?: break
                 }
                 delay(waitMs)
-                if (!isPlayingOnDemand(p) || p !== player || p.currentMediaItem?.mediaId.isFileId() != file) break
+                val stillFileLike = p.currentMediaItem?.mediaId.isFileOrStorageId() == true
+                if (!isPlayingOnDemand(p) || p !== player || stillFileLike != fileLike) break
                 if (hasUi) publishPlayback(p)
                 val syncAt = syncAtMs ?: continue
                 val now = SystemClock.elapsedRealtime()

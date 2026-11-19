@@ -27,11 +27,13 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -45,8 +47,19 @@ import com.podcastapp.data.feed.CredentialKind
 import com.podcastapp.data.feed.SourceCredentials
 import com.podcastapp.data.feed.SourceTransport
 import com.podcastapp.data.feed.platformLabel
+import com.podcastapp.data.storage.NetworkStorageLibrary
+import com.podcastapp.data.storage.StorageMedia
+import com.podcastapp.data.storage.StorageProvider
+import com.podcastapp.data.storage.StorageSource
+import com.podcastapp.data.storage.WebDavClient
+import com.podcastapp.data.storage.WebDavEntry
+import com.podcastapp.playback.PlaybackHolder
 import com.podcastapp.ui.SharedImport
 import com.podcastapp.ui.components.InlineIssue
+import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 @Suppress("UNUSED_PARAMETER")
@@ -122,6 +135,124 @@ fun DiscoverScreen(
     fun submitAndHideKeyboard() {
         focusManager.clearFocus()
         if (state.input.isNotBlank()) startImport()
+    }
+    // 网络存储凭据只保存在本次组合的局部状态：不进 ViewModel、不落盘、不用 rememberSaveable。
+    var storageProvider by remember { mutableStateOf(StorageProvider.WEBDAV) }
+    var storageProviderMenuExpanded by remember { mutableStateOf(false) }
+    var storageLabel by remember { mutableStateOf("") }
+    var storageBaseUrl by remember { mutableStateOf("") }
+    var storageRootPath by remember { mutableStateOf("") }
+    var storageAuthKind by remember { mutableStateOf(CredentialKind.NONE) }
+    var storageAuthMenuExpanded by remember { mutableStateOf(false) }
+    var storageUsername by remember { mutableStateOf("") }
+    var storageSecret by remember { mutableStateOf("") }
+    var storageHeaderName by remember { mutableStateOf("X-API-Key") }
+    var storageMessage by remember { mutableStateOf<String?>(null) }
+    val storageLabelFocus = remember { FocusRequester() }
+    val storageBaseUrlFocus = remember { FocusRequester() }
+    val storageRootPathFocus = remember { FocusRequester() }
+    val storageUsernameFocus = remember { FocusRequester() }
+    val storageSecretFocus = remember { FocusRequester() }
+    val storageHeaderNameFocus = remember { FocusRequester() }
+    val context = LocalContext.current
+    val appContext = context.applicationContext
+    val scope = rememberCoroutineScope()
+    val networkLibrary = remember(appContext) { NetworkStorageLibrary(appContext) }
+    val storageSources by networkLibrary.sources.collectAsState()
+    var activeSourceId by remember { mutableStateOf<String?>(null) }
+    var browserPathStack by remember { mutableStateOf(listOf<String>()) }
+    var browserEntries by remember { mutableStateOf<List<WebDavEntry>>(emptyList()) }
+    var browserLoading by remember { mutableStateOf(false) }
+    var browserError by remember { mutableStateOf<String?>(null) }
+    val currentBrowserPath = browserPathStack.lastOrNull().orEmpty()
+    fun loadStorageDirectory(source: StorageSource, path: String) {
+        if (activeSourceId != source.id || browserPathStack.lastOrNull() != path) return
+        browserLoading = true
+        browserError = null
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                val (creds, transport) = networkLibrary.credentialsFor(source.id)
+                WebDavClient(source.baseUrl, creds, transport).list(path)
+            }
+            if (activeSourceId != source.id || browserPathStack.lastOrNull() != path) return@launch
+            browserLoading = false
+            result.onSuccess { browserEntries = it }
+                .onFailure { error ->
+                    browserEntries = emptyList()
+                    browserError = "读取目录失败：${error.message ?: "未知错误"}"
+                }
+        }
+    }
+    fun openStorageSource(source: StorageSource) {
+        activeSourceId = source.id
+        browserPathStack = listOf(source.rootPath.trim().trim('/'))
+        browserEntries = emptyList()
+        browserError = null
+        loadStorageDirectory(source, browserPathStack.last())
+    }
+    fun playStorageEntry(source: StorageSource, entry: WebDavEntry) {
+        scope.launch {
+            val (creds, transport) = networkLibrary.credentialsFor(source.id)
+            runCatching {
+                val client = WebDavClient(source.baseUrl, creds, transport)
+                val media = StorageMedia(
+                    sourceId = source.id,
+                    url = client.resolveFileUrl(entry.path),
+                    title = entry.name,
+                    mime = entry.contentType,
+                )
+                PlaybackHolder.playStorage(appContext, media, creds, transport)
+            }.onFailure { error -> browserError = "播放失败：${error.message ?: "未知错误"}" }
+        }
+    }
+    fun addStorageSource() {
+        scope.launch {
+            val selectedCredentials = when (storageAuthKind) {
+                CredentialKind.NONE -> SourceCredentials()
+                CredentialKind.BASIC -> SourceCredentials(kind = CredentialKind.BASIC, username = storageUsername, secret = storageSecret)
+                CredentialKind.BEARER -> SourceCredentials(kind = CredentialKind.BEARER, secret = storageSecret)
+                CredentialKind.API_KEY -> SourceCredentials(
+                    kind = CredentialKind.API_KEY,
+                    secret = storageSecret,
+                    header = storageHeaderName.ifBlank { "X-API-Key" },
+                )
+                CredentialKind.DIGEST -> SourceCredentials(kind = CredentialKind.DIGEST, username = storageUsername, secret = storageSecret)
+            }
+            val selectedTransport = SourceTransport(digest = storageAuthKind == CredentialKind.DIGEST)
+            // 提交后立即清空一次性凭据，不留在组合状态里。
+            storageSecret = ""
+            storageUsername = ""
+            storageHeaderName = "X-API-Key"
+            val result = withContext(Dispatchers.IO) {
+                networkLibrary.add(
+                    provider = storageProvider,
+                    label = storageLabel.ifBlank { storageProviderLabel(storageProvider) },
+                    baseUrl = storageBaseUrl,
+                    rootPath = storageRootPath,
+                    credentials = selectedCredentials,
+                    transport = selectedTransport,
+                )
+            }
+            storageMessage = result.fold(
+                onSuccess = { "已添加来源：${it.label}" },
+                onFailure = { "添加失败：${it.message ?: "未知错误"}" },
+            )
+        }
+    }
+    fun removeStorageSource(source: StorageSource) {
+        scope.launch {
+            val result = runCatching { withContext(Dispatchers.IO) { networkLibrary.remove(source.id) } }
+            if (result.isSuccess && activeSourceId == source.id) {
+                activeSourceId = null
+                browserPathStack = emptyList()
+                browserEntries = emptyList()
+                browserError = null
+            }
+            storageMessage = result.fold(
+                onSuccess = { "已移除来源：${source.label}" },
+                onFailure = { "移除失败：${it.message ?: "未知错误"}" },
+            )
+        }
     }
     Column(
         // 外层已按 safeDrawing 预留系统栏；此处只补 IME 高度，避免叠加导航条留白。
@@ -363,6 +494,231 @@ fun DiscoverScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
+        Text("网络存储（可选）", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge)
+        Text(
+            "添加 WebDAV 来源后可直接浏览目录并播放音频；来源信息保存在本机，凭据加密单独保存。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Button(onClick = { storageProviderMenuExpanded = true }, modifier = Modifier.fillMaxWidth()) {
+            Text("来源类型：${storageProviderLabel(storageProvider)}")
+        }
+        DropdownMenu(
+            expanded = storageProviderMenuExpanded,
+            onDismissRequest = { storageProviderMenuExpanded = false },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            StorageProvider.values().forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(storageProviderLabel(option)) },
+                    onClick = {
+                        storageProvider = option
+                        storageBaseUrl = ""
+                        storageProviderMenuExpanded = false
+                    },
+                )
+            }
+        }
+        when (storageProvider) {
+            StorageProvider.JIANGUOYUN -> Text(
+                "坚果云官方 WebDAV 地址：https://dav.jianguoyun.com/dav/。用户名填注册邮箱，密码请使用坚果云应用密码（不是登录密码）。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            StorageProvider.ZSPACE -> Text(
+                "极空间：请先在 NAS 的系统设置中开启 WebDAV，再填写实际的 HTTPS/HTTP 地址与根路径；应用不会自动发现设备。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            StorageProvider.WEBDAV -> Unit
+        }
+        OutlinedTextField(
+            value = storageLabel,
+            onValueChange = { storageLabel = it },
+            label = { Text("显示名称（可选）") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next, autoCorrect = false, capitalization = KeyboardCapitalization.None),
+            keyboardActions = KeyboardActions(onNext = { moveTo(storageBaseUrlFocus) }),
+            modifier = Modifier.fillMaxWidth().focusRequester(storageLabelFocus),
+        )
+        OutlinedTextField(
+            value = storageBaseUrl,
+            onValueChange = { storageBaseUrl = it },
+            label = { Text("WebDAV 地址") },
+            placeholder = { Text(if (storageProvider == StorageProvider.JIANGUOYUN) "https://dav.jianguoyun.com/dav/" else "https://example.com/dav/") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next, autoCorrect = false, capitalization = KeyboardCapitalization.None),
+            keyboardActions = KeyboardActions(onNext = { moveTo(storageRootPathFocus) }),
+            modifier = Modifier.fillMaxWidth().focusRequester(storageBaseUrlFocus),
+        )
+        OutlinedTextField(
+            value = storageRootPath,
+            onValueChange = { storageRootPath = it },
+            label = { Text("根路径（可选）") },
+            placeholder = { Text("例如 Music/有声书") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                imeAction = if (storageAuthKind == CredentialKind.NONE) ImeAction.Done else ImeAction.Next,
+                autoCorrect = false,
+                capitalization = KeyboardCapitalization.None,
+            ),
+            keyboardActions = KeyboardActions(
+                onNext = { moveTo(if (storageAuthKind == CredentialKind.BASIC || storageAuthKind == CredentialKind.DIGEST) storageUsernameFocus else storageSecretFocus) },
+                onDone = { focusManager.clearFocus(); addStorageSource() },
+            ),
+            modifier = Modifier.fillMaxWidth().focusRequester(storageRootPathFocus),
+        )
+        Button(onClick = { storageAuthMenuExpanded = true }, modifier = Modifier.fillMaxWidth()) {
+            Text("来源凭据：${credentialKindLabel(storageAuthKind)}")
+        }
+        DropdownMenu(
+            expanded = storageAuthMenuExpanded,
+            onDismissRequest = { storageAuthMenuExpanded = false },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            CredentialKind.values().forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(credentialKindLabel(option)) },
+                    onClick = {
+                        storageAuthKind = option
+                        storageSecret = ""
+                        storageUsername = ""
+                        storageAuthMenuExpanded = false
+                    },
+                )
+            }
+        }
+        if (storageAuthKind == CredentialKind.BASIC || storageAuthKind == CredentialKind.DIGEST) {
+            OutlinedTextField(
+                value = storageUsername,
+                onValueChange = { storageUsername = it },
+                label = { Text("用户名") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next, autoCorrect = false, capitalization = KeyboardCapitalization.None),
+                keyboardActions = KeyboardActions(onNext = { moveTo(storageSecretFocus) }),
+                modifier = Modifier.fillMaxWidth().focusRequester(storageUsernameFocus),
+            )
+        }
+        if (storageAuthKind != CredentialKind.NONE) {
+            SecureField(
+                value = storageSecret,
+                onValueChange = { storageSecret = it },
+                label = when (storageAuthKind) {
+                    CredentialKind.BASIC -> "密码"
+                    CredentialKind.BEARER -> "Bearer Token"
+                    CredentialKind.API_KEY -> "API Key"
+                    CredentialKind.DIGEST -> "Digest 密码"
+                    CredentialKind.NONE -> ""
+                },
+                imeAction = if (storageAuthKind == CredentialKind.API_KEY) ImeAction.Next else ImeAction.Done,
+                keyboardActions = KeyboardActions(
+                    onNext = { moveTo(storageHeaderNameFocus) },
+                    onDone = { focusManager.clearFocus(); addStorageSource() },
+                ),
+                focusRequester = storageSecretFocus,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (storageAuthKind == CredentialKind.API_KEY) {
+            OutlinedTextField(
+                value = storageHeaderName,
+                onValueChange = { storageHeaderName = it },
+                label = { Text("API Key 头名") },
+                placeholder = { Text("X-API-Key") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done, autoCorrect = false, capitalization = KeyboardCapitalization.None),
+                keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus(); addStorageSource() }),
+                modifier = Modifier.fillMaxWidth().focusRequester(storageHeaderNameFocus),
+            )
+        }
+        Button(
+            onClick = { focusManager.clearFocus(); addStorageSource() },
+            enabled = storageProvider == StorageProvider.JIANGUOYUN || storageBaseUrl.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("添加来源") }
+        storageMessage?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+        Text("已保存网络存储来源", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+        if (storageSources.isEmpty()) {
+            Text("还没有网络存储来源。", style = MaterialTheme.typography.bodyMedium)
+        }
+        storageSources.forEach { source ->
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(source.label, style = MaterialTheme.typography.titleMedium)
+                    Text("${storageProviderLabel(source.provider)} · ${source.baseUrl}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (source.rootPath.isNotBlank()) {
+                        Text("根路径：${source.rootPath}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = {
+                            if (activeSourceId == source.id) {
+                                activeSourceId = null
+                                browserPathStack = emptyList()
+                                browserEntries = emptyList()
+                                browserError = null
+                            } else {
+                                openStorageSource(source)
+                            }
+                        }) { Text(if (activeSourceId == source.id) "收起目录" else "浏览目录") }
+                        TextButton(onClick = { removeStorageSource(source) }) { Text("移除") }
+                    }
+                    if (activeSourceId == source.id) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                "目录：${if (currentBrowserPath.isBlank()) "/" else "/$currentBrowserPath"}",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(
+                                onClick = {
+                                    if (browserPathStack.size > 1) {
+                                        browserPathStack = browserPathStack.dropLast(1)
+                                        loadStorageDirectory(source, browserPathStack.last())
+                                    } else {
+                                        activeSourceId = null
+                                        browserPathStack = emptyList()
+                                        browserEntries = emptyList()
+                                        browserError = null
+                                    }
+                                },
+                                enabled = !browserLoading,
+                            ) { Text("返回") }
+                            TextButton(onClick = { loadStorageDirectory(source, currentBrowserPath) }, enabled = !browserLoading) { Text("刷新") }
+                        }
+                        if (browserLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                        browserError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                        if (!browserLoading && browserError == null && browserEntries.isEmpty()) {
+                            Text("此目录为空或没有可访问的条目。", style = MaterialTheme.typography.bodySmall)
+                        }
+                        browserEntries.forEach { entry ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(entry.name, style = MaterialTheme.typography.bodyMedium)
+                                    val detail = listOfNotNull(
+                                        entry.size?.takeIf { it > 0 }?.let { "%.1f MB".format(it / 1_048_576.0) },
+                                        entry.contentType,
+                                    ).joinToString(" · ")
+                                    if (detail.isNotBlank()) {
+                                        Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                                when {
+                                    entry.directory -> TextButton(onClick = {
+                                        browserPathStack = browserPathStack + entry.path
+                                        loadStorageDirectory(source, entry.path)
+                                    }) { Text("进入") }
+                                    isAudioEntry(entry) -> TextButton(onClick = { playStorageEntry(source, entry) }) { Text("播放") }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Text("我的本地订阅", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge)
         if (state.feeds.isEmpty()) {
             Text("还没有本地订阅。导入公开 RSS 后即可在此浏览和播放。", style = MaterialTheme.typography.bodyMedium)
@@ -431,6 +787,20 @@ private fun SecureField(
         keyboardActions = keyboardActions,
         modifier = fieldModifier,
     )
+}
+
+private fun storageProviderLabel(provider: StorageProvider): String = when (provider) {
+    StorageProvider.WEBDAV -> "通用 WebDAV"
+    StorageProvider.JIANGUOYUN -> "坚果云"
+    StorageProvider.ZSPACE -> "极空间"
+}
+
+private fun isAudioEntry(entry: WebDavEntry): Boolean {
+    val mime = entry.contentType?.substringBefore(';')?.trim()?.lowercase(Locale.ROOT)
+    if (mime?.startsWith("audio/") == true) return true
+    if (mime?.startsWith("video/") == true) return false
+    val extension = entry.name.substringAfterLast('.').lowercase(Locale.ROOT)
+    return extension in setOf("mp3", "m4a", "aac", "ogg", "oga", "opus", "wav", "wave", "flac", "aiff", "aif", "wma")
 }
 
 private fun credentialKindLabel(kind: CredentialKind): String = when (kind) {
