@@ -758,7 +758,7 @@ private struct AddSourceView: View {
                 }
                 .disabled(library.isFetching)
                 Section("传输加密（可选）") {
-                    Toggle("仅允许 HTTPS（禁止降级跳转）", isOn: $requireHttps)
+                    Toggle("仅允许 HTTPS（可选，默认关闭）", isOn: $requireHttps)
                     Toggle("HTTP Digest 认证（401 挑战后再计算）", isOn: $useDigest)
                     inputRow("自定义 CA PEM") {
                         TextEditor(text: $caPEM).frame(minHeight: 60)
@@ -795,7 +795,7 @@ private struct AddSourceView: View {
                 DisclosureGroup("支持的来源与限制") {
                     Text("公开 RSS / Atom 地址与 OPML 订阅列表 URL 通过 URLSession 直接读取；Apple Podcasts 分享链接先请求官方 iTunes Lookup JSON，再读取其中的 RSS。")
                     Text("Spotify、小宇宙、喜马拉雅分享链接需要节目公开 RSS 地址；不会抓取第三方网页。")
-                    Text("订阅与单集保存在本机文档目录的 JSON 文件中；认证凭据按订阅 ID 存入系统钥匙串，不写入 JSON，也不会在跨主机跳转时转发。播放仅支持 HTTPS 音源，遵循系统证书校验。")
+                    Text("订阅与单集保存在本机文档目录的 JSON 文件中；认证凭据按订阅 ID 存入系统钥匙串，不写入 JSON，也不会在跨主机跳转时转发。feed 默认允许 http 与 https，建议优先使用 https；仅开启上方开关时才禁止 http。")
                 }
             }
             .scrollDismissesKeyboard(.interactively)
@@ -975,9 +975,9 @@ private final class EpisodePlayback: ObservableObject {
         reset()
         title = episode.title
         guard let components = URLComponents(string: episode.audioUrl),
-              components.scheme?.lowercased() == "https", let host = components.host, !host.isEmpty,
+              (components.scheme?.lowercased() == "https" || components.scheme?.lowercased() == "http"), let host = components.host, !host.isEmpty,
               components.user == nil, components.password == nil, let url = components.url else {
-            status = "该单集没有可播放的 HTTPS 音频地址。"
+            status = "该单集没有可播放的 HTTP(S) 音频地址。"
             return
         }
         let item = AVPlayerItem(url: url)

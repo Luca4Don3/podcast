@@ -209,7 +209,7 @@ fun DiscoverScreen(
 
         Text("传输加密（可选）", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
         Text(
-            "要求 HTTPS 时拒绝 http 地址及任何降级到 http 的跳转；跨主机或降级跳转会剥离认证与客户端证书，绝不写入订阅 JSON。",
+            "默认同时支持 http 与 https，建议优先使用 https。只有勾选“仅允许 HTTPS”时才会拒绝 http 地址及降级跳转；跨主机或降级跳转仍会剥离认证与客户端证书。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -219,7 +219,7 @@ fun DiscoverScreen(
                 onCheckedChange = { requireHttps = it },
                 enabled = !state.loading,
             )
-            Text("要求 HTTPS（禁止 http 与降级跳转）")
+            Text("仅允许 HTTPS（可选，默认关闭）")
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(

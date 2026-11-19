@@ -2,7 +2,7 @@
 
 参考 Apple Podcasts 的信息架构与交互，面向 Android、iPhone 和 iPad 的播客接收与播放客户端。应用直接读取公开 RSS/Atom、OPML 和平台分享链接；**不再要求自建后端，也不作为播客分发平台**。
 
-公开仓库：<https://github.com/Luca4Don3/podcast>。当前开发版本：1.5.0（client-only，尚未发布到 GitHub Release）。
+公开仓库：<https://github.com/Luca4Don3/podcast>。当前开发版本：1.5.1（client-only，尚未发布到 GitHub Release）。
 
 新版本 tag 仅构建 Android 手机／平板包和 iPhone／iPad 模拟器包；历史 Release 不覆盖。Apple 真机包仍需自己的签名。
 
@@ -11,7 +11,7 @@
 - 直接导入公开 RSS 2.0 / Atom 订阅地址，客户端解析节目与单集，音频从原始发布方地址播放。
 - 导入 OPML，一次迁移已有订阅列表。
 - 识别 Apple Podcasts 分享链接，使用官方 iTunes Lookup 取得公开 feed；Spotify、小宇宙、喜马拉雅的公开节目页链接可识别平台，但**不会伪造 RSS**——需要节目自身的公开 feed 才能订阅。
-- 来源级认证与加密：支持链接内账号密码/Token/API Key、Digest、强制 HTTPS、自定义 CA 与 mTLS；凭据和私钥加密保存在本机，只发送给对应来源。
+- 来源级认证与加密：支持链接内账号密码/Token/API Key、Digest、可选仅 HTTPS（默认允许 HTTP，建议 HTTPS）、自定义 CA 与 mTLS；凭据和私钥加密保存在本机，只发送给对应来源。
 - 不绕过付费、地区限制、登录墙或 DRM；免费可听不等于取得转播授权。
 
 详见 [平台接入说明](<docs/PLATFORM_ADAPTERS.md>)。
