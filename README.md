@@ -12,7 +12,7 @@
 - 导入 OPML，一次迁移已有订阅列表。
 - 识别 Apple Podcasts 分享链接，使用官方 iTunes Lookup 取得公开 feed；Spotify、小宇宙、喜马拉雅的公开节目页链接可识别平台，但**不会伪造 RSS**——需要节目自身的公开 feed 才能订阅。
 - 来源级认证与加密：支持链接内账号密码/Token/API Key、Digest、可选仅 HTTPS（默认允许 HTTP，建议 HTTPS）、自定义 CA 与 mTLS；凭据和私钥加密保存在本机，只发送给对应来源。
-- 网络音频：通用 WebDAV、坚果云、极空间 WebDAV；飞连企业网络使用系统路由并提供目标 WebDAV 试连。
+- 网络音频：通用 WebDAV、坚果云、极空间 WebDAV、飞连企业网络（WebDAV）；新增 SMB 2/3 直连 NAS 来源，支持只读浏览和按偏移读取。
 - OneDrive 提供官方设备码授权与只读音频浏览；无需自建后端，授权不等于已完成真实租户验收。
 - 不绕过付费、地区限制、登录墙或 DRM；免费可听不等于取得转播授权。
 
