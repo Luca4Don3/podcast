@@ -95,6 +95,46 @@ private struct LocalFeedStore {
     }
 }
 
+// MARK: - Network storage metadata (public fields only)
+
+/// Non-sensitive metadata for one network storage source. Stored in a dedicated JSON file.
+/// Credentials, tokens, client certificates and resolved file URLs are NEVER written here;
+/// they are keyed by `id` in `FeedSecretStore` instead.
+private struct StoredNetworkSource: Codable, Identifiable, Equatable, Sendable {
+    let id: String
+    var provider: String
+    var label: String
+    var baseUrl: String
+    var rootPath: String
+
+    var webDavSource: WebDavSource? {
+        guard let kind = WebDavProvider(rawValue: provider) else { return nil }
+        return WebDavSource(id: id, provider: kind, label: label, baseUrl: baseUrl, rootPath: rootPath)
+    }
+}
+
+/// A separate file from the feed library. Only source metadata is persisted here.
+private struct NetworkStorageStore {
+    let fileURL: URL
+
+    init(fileName: String = "podcast-network-storage.json") {
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        fileURL = directory.appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    func load() -> [StoredNetworkSource] {
+        guard let data = try? Data(contentsOf: fileURL) else { return [] }
+        return (try? JSONDecoder().decode([StoredNetworkSource].self, from: data)) ?? []
+    }
+
+    func save(_ sources: [StoredNetworkSource]) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(sources)
+        try data.write(to: fileURL, options: .atomic)
+    }
+}
 
 // MARK: - Credential and transport storage (Keychain on Apple platforms, memory fallback elsewhere)
 
@@ -217,6 +257,27 @@ private enum FeedAddError: LocalizedError {
         case .webNeedsRSS: return "需要节目公开 RSS 地址。该平台的分享链接无法直接解析为订阅源。"
         case .httpsRequired: return "该来源要求 HTTPS，已拒绝 HTTP 地址或降级跳转。"
         case .invalidTransport: return "传输加密设置无效，请检查证书与私钥。"
+        }
+    }
+}
+
+/// Fixed, localized errors for the optional network storage section.
+private enum NetworkStorageError: LocalizedError {
+    case emptyLabel
+    case invalidBaseURL
+    case invalidRootPath
+    case invalidTransport
+    case listFailed
+    case notFound
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyLabel: return "请输入显示名。"
+        case .invalidBaseURL: return "地址无效：仅接受不含用户名/密码、查询参数或片段的 http(s) 地址。"
+        case .invalidRootPath: return "根路径无效：请使用普通目录路径，且不要包含 .. 或空格。"
+        case .invalidTransport: return "传输加密设置无效，请检查证书与私钥。"
+        case .listFailed: return "无法读取该目录，请检查地址、认证和权限后重试。"
+        case .notFound: return "找不到该网络存储来源。"
         }
     }
 }
@@ -426,8 +487,15 @@ private final class LibrarySession: ObservableObject {
     @Published private(set) var isFetching = false
     @Published private(set) var addError: String?
     @Published private(set) var libraryError: String?
+    @Published private(set) var storageSources: [StoredNetworkSource] = []
+    @Published private(set) var storageSelection: String?
+    @Published private(set) var storageEntries: [WebDavEntry] = []
+    @Published private(set) var storagePath = ""
+    @Published private(set) var isBrowsingStorage = false
+    @Published private(set) var storageError: String?
 
     private let store = LocalFeedStore()
+    private let storageStore = NetworkStorageStore()
     let playback = EpisodePlayback()
 
     var selectedFeed: StoredFeed? {
@@ -436,14 +504,38 @@ private final class LibrarySession: ObservableObject {
 
     init() {
         feeds = store.load()
+        storageSources = storageStore.load()
     }
 
-    func select(_ feedID: String?) {
-        guard selection != feedID else { return }
-        if let feedID {
-            guard feeds.contains(where: { $0.id == feedID }) else { return }
+    private static let storageSelectionPrefix = "storage:"
+
+    private var selectedStorageSourceID: String? { storageSelection }
+
+    private func storageSource(_ id: String) -> StoredNetworkSource? {
+        storageSources.first { $0.id == id }
+    }
+
+    func select(_ itemID: String?) {
+        guard selection != itemID else { return }
+        if let itemID {
+            if itemID.hasPrefix(Self.storageSelectionPrefix) {
+                let sourceID = String(itemID.dropFirst(Self.storageSelectionPrefix.count))
+                guard storageSources.contains(where: { $0.id == sourceID }) else { return }
+                storageSelection = sourceID
+            } else {
+                guard feeds.contains(where: { $0.id == itemID }) else { return }
+                storageSelection = nil
+            }
+        } else {
+            storageSelection = nil
         }
-        selection = feedID
+        selection = itemID
+        storagePath = ""
+        storageEntries = []
+        storageError = nil
+        if let id = selectedStorageSourceID {
+            Task { @MainActor in await browseStorage(sourceID: id, path: "") }
+        }
     }
 
     func removeFeed(_ feedID: String) {
@@ -452,6 +544,160 @@ private final class LibrarySession: ObservableObject {
         if selection == feedID { selection = feeds.first?.id }
         FeedSecretStore.remove(for: feedID)
         persist()
+    }
+
+    // MARK: - Network storage sources
+
+    @discardableResult
+    func addNetworkSource(provider: WebDavProvider, label: String, baseURL: String, rootPath: String,
+                          credentials: SourceCredentials, transport: SourceTransport) async -> Bool {
+        do { try transport.validate() } catch {
+            addError = NetworkStorageError.invalidTransport.errorDescription
+            return false
+        }
+        let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            addError = NetworkStorageError.emptyLabel.errorDescription
+            return false
+        }
+        guard let base = Self.safeStorageBaseURL(baseURL, requireHttps: transport.requireHttps) else {
+            addError = NetworkStorageError.invalidBaseURL.errorDescription
+            return false
+        }
+        guard let root = Self.safeRootPath(rootPath) else {
+            addError = NetworkStorageError.invalidRootPath.errorDescription
+            return false
+        }
+        let source = StoredNetworkSource(id: UUID().uuidString, provider: provider.rawValue,
+                                         label: name, baseUrl: base, rootPath: root)
+        storageSources.append(source)
+        storageSelection = source.id
+        selection = Self.storageSelectionPrefix + source.id
+        storagePath = ""
+        storageEntries = []
+        storageError = nil
+        // Secrets and transport material live only in the Keychain, keyed by source.id.
+        FeedSecretStore.save(StoredFeedSecrets(credentials: credentials, transport: transport), for: source.id)
+        persistStorage()
+        await browseStorage(sourceID: source.id, path: "")
+        return true
+    }
+
+    func removeNetworkSource(_ id: String) {
+        guard let index = storageSources.firstIndex(where: { $0.id == id }) else { return }
+        storageSources.remove(at: index)
+        FeedSecretStore.remove(for: id)
+        if storageSelection == id {
+            storageSelection = nil
+            selection = nil
+            storageEntries = []
+            storagePath = ""
+            storageError = nil
+        }
+        persistStorage()
+    }
+
+    /// Strict validation: no userinfo, no query/fragment (no credentials in the stored URL).
+    private static func safeStorageBaseURL(_ raw: String, requireHttps: Bool) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let forbidden = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
+        guard !value.isEmpty, value.rangeOfCharacter(from: forbidden) == nil,
+              !value.contains("\\"),
+              var components = URLComponents(string: value),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              !(requireHttps && scheme != "https"),
+              let host = components.percentEncodedHost, !host.isEmpty,
+              components.user == nil, components.password == nil,
+              components.percentEncodedUser == nil, components.percentEncodedPassword == nil,
+              components.query == nil, components.percentEncodedQuery == nil,
+              components.fragment == nil,
+              components.port.map({ (1...65535).contains($0) }) ?? true,
+              components.url != nil else { return nil }
+        components.scheme = scheme
+        components.percentEncodedHost = host.lowercased()
+        return components.url?.absoluteString
+    }
+
+    private static func safeRootPath(_ raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty || value == "/" { return "" }
+        let forbidden = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
+        guard !value.contains("\\"), value.rangeOfCharacter(from: forbidden) == nil else { return nil }
+        let segments = value.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard !segments.isEmpty, segments.allSatisfy({ $0 != "." && $0 != ".." }) else { return nil }
+        return segments.joined(separator: "/")
+    }
+
+    /// baseURL + rootPath, used only by WebDavClient; the resolved file URL never enters UI state.
+    private static func clientBaseURL(for source: StoredNetworkSource) -> URL? {
+        storageClientBaseURL(for: source)
+    }
+
+    private static func joinStoragePath(_ base: String, _ child: String) -> String {
+        let b = base.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let c = child.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !c.isEmpty else { return b }
+        // Some servers report paths relative to the source root, not to the listed folder.
+        if !b.isEmpty, c == b || c.hasPrefix(b + "/") { return c }
+        return b.isEmpty ? c : b + "/" + c
+    }
+
+    func browseStorage(sourceID: String, path: String) async {
+        guard let source = storageSource(sourceID), let base = Self.clientBaseURL(for: source) else {
+            storageError = NetworkStorageError.notFound.errorDescription
+            return
+        }
+        isBrowsingStorage = true
+        storageError = nil
+        defer { isBrowsingStorage = false }
+        let secrets = FeedSecretStore.load(for: source.id)
+        do {
+            let client = WebDavClient(baseURL: base, credentials: secrets.credentials,
+                                      transport: secrets.transport)
+            let entries = try await client.list(path: path)
+            storageEntries = entries.sorted { lhs, rhs in
+                if lhs.directory != rhs.directory { return lhs.directory }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+            storagePath = path
+        } catch {
+            storageEntries = []
+            storageError = NetworkStorageError.listFailed.errorDescription
+        }
+    }
+
+    func refreshStorage() {
+        guard let id = selectedStorageSourceID else { return }
+        Task { @MainActor in await browseStorage(sourceID: id, path: storagePath) }
+    }
+
+    func navigateStorageUp() {
+        guard let id = selectedStorageSourceID, !storagePath.isEmpty else { return }
+        let segments = storagePath.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        let parent = segments.dropLast().joined(separator: "/")
+        Task { @MainActor in await browseStorage(sourceID: id, path: parent) }
+    }
+
+    func openStorageDirectory(_ entry: WebDavEntry) {
+        guard let id = selectedStorageSourceID else { return }
+        let child = Self.joinStoragePath(storagePath, entry.path)
+        Task { @MainActor in await browseStorage(sourceID: id, path: child) }
+    }
+
+    func playStorageEntry(_ entry: WebDavEntry, sourceID: String) {
+        guard let source = storageSource(sourceID), selectedStorageSourceID == sourceID else { return }
+        playback.playStorage(source: source, entry: entry,
+                             path: Self.joinStoragePath(storagePath, entry.path))
+    }
+
+    private func persistStorage() {
+        do {
+            try storageStore.save(storageSources)
+            libraryError = nil
+        } catch {
+            libraryError = "无法保存网络存储设置，请检查设备存储空间。"
+        }
     }
 
     func play(_ episode: StoredEpisode, feedID: String) {
@@ -890,6 +1136,7 @@ private struct LibraryView: View {
     @ObservedObject var library: LibrarySession
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showingAddSource = false
+    @State private var showingAddStorage = false
 
     private var selection: Binding<String?> {
         Binding(get: { library.selection }, set: { library.select($0) })
@@ -908,11 +1155,15 @@ private struct LibraryView: View {
         .sheet(isPresented: $showingAddSource) {
             AddSourceView(library: library)
         }
+        .sheet(isPresented: $showingAddStorage) {
+            AddNetworkStorageView(library: library)
+        }
     }
 
     private var sidebar: some View {
         List(selection: selection) {
             subscriptionRows
+            storageRows
             if let message = library.libraryError {
                 Text(message).font(.footnote).foregroundStyle(.secondary)
             }
@@ -927,6 +1178,12 @@ private struct LibraryView: View {
                     Label("添加播客源", systemImage: "plus")
                 }
                 .accessibilityLabel("添加播客源")
+                Button {
+                    showingAddStorage = true
+                } label: {
+                    Label("添加网络存储", systemImage: "externaldrive.badge.plus")
+                }
+                .accessibilityLabel("添加网络存储")
             }
         }
     }
@@ -958,8 +1215,34 @@ private struct LibraryView: View {
     }
 
     @ViewBuilder
+    private var storageRows: some View {
+        if !library.storageSources.isEmpty {
+            Section("网络存储") {
+                ForEach(library.storageSources) { source in
+                    NavigationLink(value: "storage:" + source.id) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(source.label)
+                            Text(WebDavProvider(rawValue: source.provider) == .jianguoyun ? "坚果云 WebDAV" :
+                                 (WebDavProvider(rawValue: source.provider) == .zspace ? "极空间 WebDAV" : "WebDAV"))
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) { library.removeNetworkSource(source.id) } label: {
+                            Label("移除来源", systemImage: "trash")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
     private var detail: some View {
-        if let feed = library.selectedFeed {
+        if let sourceID = library.selectedStorageSourceID {
+            StorageBrowserView(library: library, sourceID: sourceID)
+        } else if let feed = library.selectedFeed {
             List {
                 if typeSize.isAccessibilitySize {
                     Text(feed.title)
@@ -1009,6 +1292,529 @@ private struct LibraryView: View {
     }
 }
 
+// MARK: - Add network storage
+
+@MainActor
+private struct AddNetworkStorageView: View {
+    @ObservedObject var library: LibrarySession
+    @Environment(.dismiss) private var dismiss
+    @State private var provider: WebDavProvider = .webdav
+    @State private var label = ""
+    @State private var baseURL = ""
+    @State private var rootPath = ""
+
+    // Same input-state shape as AddSourceView, feeding SourceCredentials / SourceTransport.
+    @State private var authKind: CredentialKind = .basic
+    @State private var username = ""
+    @State private var secret = ""
+    @State private var apiKeyHeader = ""
+    @State private var requireHttps = true
+    @State private var useDigest = false
+    @State private var caPEM = ""
+    @State private var clientCertPEM = ""
+    @State private var clientKeyPEM = ""
+    @State private var clientKeyPassword = ""
+
+    @FocusState private var focusedField: Field?
+
+    private enum Field: Hashable {
+        case label, baseURL, rootPath, username, secret, apiKeyHeader
+        case caPEM, clientCertPEM, clientKeyPEM, clientKeyPassword
+    }
+
+    private func applyProvider(_ value: WebDavProvider) {
+        switch value {
+        case .jianguoyun:
+            if baseURL.isEmpty { baseURL = "https://dav.jianguoyun.com/dav/" }
+            authKind = .basic
+        case .zspace:
+            authKind = .basic
+        case .webdav:
+            break
+        }
+    }
+
+    private func submit() {
+        focusedField = nil
+        let credentials = SourceCredentials(kind: authKind, username: username,
+                                            secret: secret, header: apiKeyHeader)
+        let transport = SourceTransport(requireHttps: requireHttps, customCaPem: caPEM,
+                                        clientCertPem: clientCertPEM, clientKeyPem: clientKeyPEM,
+                                        clientKeyPassword: clientKeyPassword, digest: useDigest)
+        secret = ""
+        clientKeyPEM = ""
+        clientKeyPassword = ""
+        Task { @MainActor in
+            if await library.addNetworkSource(provider: provider, label: label, baseURL: baseURL,
+                                              rootPath: rootPath, credentials: credentials,
+                                              transport: transport) {
+                dismiss()
+            }
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("网络存储（可选）") {
+                    Picker("来源类型", selection: $provider) {
+                        Text("通用 WebDAV").tag(WebDavProvider.webdav)
+                        Text("坚果云").tag(WebDavProvider.jianguoyun)
+                        Text("极空间").tag(WebDavProvider.zspace)
+                    }
+                    .onChange(of: provider) { newValue in applyProvider(newValue) }
+                    switch provider {
+                    case .jianguoyun:
+                        Text("坚果云官方 WebDAV 地址是 https://dav.jianguoyun.com/dav/ 。密码请填写在坚果云 WebDAV 设置中生成的应用密码，而不是网页登录密码。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    case .zspace:
+                        Text("请先在自己的极空间 NAS 设置中开启 WebDAV 服务，再填写设备的实际 HTTPS 地址。本应用不使用任何私有 API。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    case .webdav:
+                        Text("填写支持 WebDAV 的服务器地址；仅使用标准的 PROPFIND / GET 只读请求。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    inputRow("显示名") {
+                        TextField("例如：家庭 NAS", text: $label)
+                            .textInputAutocapitalization(.never)
+                            .focused($focusedField, equals: .label)
+                    }
+                    inputRow("地址") {
+                        TextField("https://dav.example.com/", text: $baseURL)
+                            .keyboardType(.URL)
+                            .textContentType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .focused($focusedField, equals: .baseURL)
+                            .submitLabel(.next)
+                            .onSubmit { focusedField = .rootPath }
+                    }
+                    inputRow("根路径（可选）") {
+                        TextField("/", text: $rootPath)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .focused($focusedField, equals: .rootPath)
+                    }
+                }
+                .disabled(library.isFetching)
+                Section("认证（可选）") {
+                    Picker("认证方式", selection: $authKind) {
+                        Text("无").tag(CredentialKind.none)
+                        Text("Basic").tag(CredentialKind.basic)
+                        Text("Bearer").tag(CredentialKind.bearer)
+                        Text("API Key").tag(CredentialKind.apiKey)
+                        Text("Digest").tag(CredentialKind.digest)
+                    }
+                    switch authKind {
+                    case .none:
+                        EmptyView()
+                    case .basic, .digest:
+                        inputRow("用户名") {
+                            TextField("用户名", text: $username)
+                                .textContentType(.username)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .focused($focusedField, equals: .username)
+                                .submitLabel(.next)
+                                .onSubmit { focusedField = .secret }
+                        }
+                        inputRow(provider == .jianguoyun ? "应用密码" : "密码") {
+                            SecureField("密码或令牌", text: $secret)
+                                .textContentType(.password)
+                                .focused($focusedField, equals: .secret)
+                                .submitLabel(.done)
+                                .onSubmit(submit)
+                        }
+                    case .bearer:
+                        inputRow("Bearer 令牌") {
+                            SecureField("令牌", text: $secret)
+                                .textContentType(.password)
+                                .focused($focusedField, equals: .secret)
+                                .submitLabel(.done)
+                                .onSubmit(submit)
+                        }
+                    case .apiKey:
+                        inputRow("请求头名称") {
+                            TextField("X-API-Key", text: $apiKeyHeader)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .focused($focusedField, equals: .apiKeyHeader)
+                        }
+                        inputRow("API Key") {
+                            SecureField("API Key", text: $secret)
+                                .textContentType(.password)
+                                .focused($focusedField, equals: .secret)
+                        }
+                    }
+                }
+                .disabled(library.isFetching)
+                Section("传输加密（可选）") {
+                    Toggle("仅允许 HTTPS", isOn: $requireHttps)
+                    Toggle("HTTP Digest 认证（401 挑战后再计算）", isOn: $useDigest)
+                    inputRow("自定义 CA PEM") {
+                        TextEditor(text: $caPEM).frame(minHeight: 60)
+                            .font(.footnote.monospaced())
+                            .focused($focusedField, equals: .caPEM)
+                    }
+                    inputRow("客户端证书 PEM / iOS PKCS#12 Base64") {
+                        TextEditor(text: $clientCertPEM).frame(minHeight: 60)
+                            .font(.footnote.monospaced())
+                            .focused($focusedField, equals: .clientCertPEM)
+                    }
+                    inputRow("客户端私钥 PEM（仅存钥匙串）") {
+                        SecureField("私钥", text: $clientKeyPEM)
+                            .textContentType(.password)
+                            .focused($focusedField, equals: .clientKeyPEM)
+                    }
+                    inputRow("私钥密码（仅存钥匙串）") {
+                        SecureField("密码", text: $clientKeyPassword)
+                            .textContentType(.password)
+                            .focused($focusedField, equals: .clientKeyPassword)
+                    }
+                }
+                .disabled(library.isFetching)
+                Section {
+                    if library.isFetching {
+                        ProgressView("正在读取目录…")
+                    } else {
+                        Button("添加网络存储", action: submit)
+                            .disabled(label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                                      baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    if let message = library.addError {
+                        Text(message).foregroundStyle(.secondary)
+                    }
+                    if let message = library.libraryError {
+                        Text(message).foregroundStyle(.secondary)
+                    }
+                }
+                DisclosureGroup("隐私说明") {
+                    Text("显示名、地址和根路径保存在本机单独的 JSON 文件；用户名、密码/令牌与证书按来源 ID 存入系统钥匙串。真实文件地址和凭据不会写入订阅文件、JSON 或界面状态。")
+                }
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("完成") { focusedField = nil }
+                }
+            }
+            .navigationTitle("网络存储")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+            }
+        }
+        .onDisappear { secret = ""; clientKeyPEM = ""; clientKeyPassword = "" }
+    }
+
+    private func inputRow<Content: View>(_ title: LocalizedStringKey,
+                                         @ViewBuilder field: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityHidden(true)
+            field()
+                .labelsHidden()
+                .frame(minHeight: 44)
+        }
+    }
+}
+
+// MARK: - Network storage browser
+
+@MainActor
+private struct StorageBrowserView: View {
+    @ObservedObject var library: LibrarySession
+    let sourceID: String
+
+    private static let audioExtensions: Set<String> = [
+        "mp3", "m4a", "m4b", "aac", "wav", "flac", "ogg", "opus", "aiff", "aif", "wma"]
+
+    private var source: StoredNetworkSource? {
+        library.storageSources.first { $0.id == sourceID }
+    }
+
+    var body: some View {
+        List {
+            if source != nil {
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: "folder")
+                        Text("当前目录：/\(library.storagePath)")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack(spacing: 16) {
+                        Button { library.navigateStorageUp() } label: {
+                            Label("返回上级", systemImage: "arrow.up")
+                        }
+                        .disabled(library.storagePath.isEmpty || library.isBrowsingStorage)
+                        Button { library.refreshStorage() } label: {
+                            Label("刷新", systemImage: "arrow.clockwise")
+                        }
+                        .disabled(library.isBrowsingStorage)
+                    }
+                }
+                Section("内容") {
+                    if library.isBrowsingStorage {
+                        ProgressView("正在读取目录…")
+                    }
+                    if let message = library.storageError {
+                        Text(message).font(.footnote).foregroundStyle(.secondary)
+                    }
+                    if !library.isBrowsingStorage && library.storageEntries.isEmpty &&
+                        library.storageError == nil {
+                        Text("该目录为空。").foregroundStyle(.secondary)
+                    }
+                    ForEach(library.storageEntries, id: \.path) { entry in
+                        row(entry)
+                    }
+                }
+            }
+        }
+        .navigationTitle(source?.label ?? "网络存储")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            if library.storageSelection != sourceID {
+                library.select("storage:" + sourceID)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ entry: WebDavEntry) -> some View {
+        if entry.directory {
+            Button { library.openStorageDirectory(entry) } label: {
+                Label(entry.name, systemImage: "folder")
+            }
+            .disabled(library.isBrowsingStorage)
+        } else if Self.isAudio(entry) {
+            Button { library.playStorageEntry(entry, sourceID: sourceID) } label: {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(entry.name).fixedSize(horizontal: false, vertical: true)
+                        if let size = entry.size, size > 0 {
+                            Text(Self.sizeText(size)).font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                } icon: {
+                    Image(systemName: "play.circle")
+                }
+            }
+        } else {
+            Label(entry.name, systemImage: "doc").foregroundStyle(.secondary)
+        }
+    }
+
+    private static func isAudio(_ entry: WebDavEntry) -> Bool {
+        audioExtensions.contains((entry.name as NSString).pathExtension.lowercased())
+    }
+
+    private static func sizeText(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+}
+
+// MARK: - Network storage playback bridge
+
+/// Custom scheme only. The host carries the source id and the path is base64url encoded,
+/// so no real URL, host or credential ever appears in AVPlayer/UI state.
+private enum StoragePlaybackURL {
+    static let scheme = "podcast-storage"
+    private static let allowedSourceID = CharacterSet(
+        charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+
+    static func make(sourceID: String, path: String) -> URL? {
+        guard !sourceID.isEmpty, !path.isEmpty,
+              sourceID.rangeOfCharacter(from: allowedSourceID.inverted) == nil else { return nil }
+        let encoded = Data(path.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = sourceID.lowercased()
+        components.path = "/" + encoded
+        return components.url
+    }
+
+    static func parse(_ url: URL) -> (sourceID: String, path: String)? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == scheme,
+              let host = components.host, !host.isEmpty,
+              host.rangeOfCharacter(from: allowedSourceID.inverted) == nil else { return nil }
+        var raw = String(components.path.dropFirst())
+        guard !raw.isEmpty else { return nil }
+        raw = raw.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = raw.count % 4
+        if remainder != 0 { raw += String(repeating: "=", count: 4 - remainder) }
+        guard let data = Data(base64Encoded: raw),
+              let path = String(data: data, encoding: .utf8), !path.isEmpty else { return nil }
+        return (host, path)
+    }
+}
+
+/// Shared base URL (server address + root path). Never contains credentials.
+private func storageClientBaseURL(for source: StoredNetworkSource) -> URL? {
+    guard var components = URLComponents(string: source.baseUrl) else { return nil }
+    var path = components.percentEncodedPath
+    if !path.hasSuffix("/") { path += "/" }
+    if !source.rootPath.isEmpty {
+        let encoded = source.rootPath.split(separator: "/", omittingEmptySubsequences: true)
+            .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "" }
+            .joined(separator: "/")
+        path += encoded + "/"
+    }
+    components.percentEncodedPath = path
+    return components.url
+}
+
+private enum StoragePlaybackError: LocalizedError {
+    case sourceMissing, invalidURL, invalidRange, badResponse
+
+    var errorDescription: String? {
+        switch self {
+        case .sourceMissing: return "网络存储来源不存在。"
+        case .invalidURL: return "音频地址无效。"
+        case .invalidRange: return "音频范围请求无效。"
+        case .badResponse: return "无法读取音频数据。"
+        }
+    }
+}
+
+/// Resolves custom-scheme requests into an authenticated WebDAV GET with Range support.
+/// Reuses the same credential headers, custom CA, client certificate, digest and redirect
+/// policy as feed requests; handles only URLs created by StoragePlaybackURL.
+private final class StorageResourceLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var tasks: [ObjectIdentifier: Task<Void, Never>] = [:]
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        guard let url = loadingRequest.request.url,
+              let target = StoragePlaybackURL.parse(url) else { return false }
+        let key = ObjectIdentifier(loadingRequest)
+        let task = Task { [weak self] in
+            await self?.fulfill(target, request: loadingRequest)
+            self?.forget(key)
+        }
+        lock.lock()
+        tasks[key] = task
+        lock.unlock()
+        return true
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        didCancel loadingRequest: AVAssetResourceLoadingRequest) {
+        let key = ObjectIdentifier(loadingRequest)
+        lock.lock()
+        let task = tasks.removeValue(forKey: key)
+        lock.unlock()
+        task?.cancel()
+    }
+
+    private func forget(_ key: ObjectIdentifier) {
+        lock.lock()
+        tasks.removeValue(forKey: key)
+        lock.unlock()
+    }
+
+    private func fulfill(_ target: (sourceID: String, path: String),
+                         request: AVAssetResourceLoadingRequest) async {
+        do {
+            try Task.checkCancellation()
+            guard let stored = NetworkStorageStore().load().first(where: { $0.id == target.sourceID }),
+                  stored.webDavSource != nil,
+                  let base = storageClientBaseURL(for: stored) else {
+                throw StoragePlaybackError.sourceMissing
+            }
+            let secrets = FeedSecretStore.load(for: stored.id)
+            let client = WebDavClient(baseURL: base, credentials: secrets.credentials,
+                                      transport: secrets.transport)
+            let realURL = try client.fileURL(path: target.path)
+            guard let scheme = realURL.scheme?.lowercased(),
+                  scheme == "https" || scheme == "http" else { throw StoragePlaybackError.invalidURL }
+
+            let dataRequest = request.dataRequest
+            let offset = dataRequest?.requestedOffset ?? 0
+            let length = dataRequest?.requestedLength ?? 0
+            let wantsAll = dataRequest?.requestsAllDataToEndOfResource ?? true
+            guard offset >= 0 else { throw StoragePlaybackError.invalidRange }
+
+            var urlRequest = URLRequest(url: realURL, cachePolicy: .reloadIgnoringLocalCacheData,
+                                        timeoutInterval: 60)
+            urlRequest.httpShouldHandleCookies = false
+            if wantsAll {
+                urlRequest.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
+            } else {
+                guard length > 0 else { throw StoragePlaybackError.invalidRange }
+                urlRequest.setValue("bytes=\(offset)-\(offset + Int64(length) - 1)",
+                                    forHTTPHeaderField: "Range")
+            }
+            // Basic/Bearer/API Key are static headers; Digest is answered on challenge.
+            for (field, value) in secrets.credentials.httpHeaders {
+                urlRequest.setValue(value, forHTTPHeaderField: field)
+            }
+
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.urlCache = nil
+            configuration.httpCookieStorage = nil
+            configuration.httpShouldSetCookies = false
+            configuration.urlCredentialStorage = nil
+            let session = URLSession(configuration: configuration,
+                                     delegate: FeedSessionDelegate(transport: secrets.transport,
+                                                                   credentials: secrets.credentials,
+                                                                   originalURL: realURL),
+                                     delegateQueue: nil)
+            defer { session.finishTasksAndInvalidate() }
+            let (data, response) = try await session.data(for: urlRequest)
+            try Task.checkCancellation()
+            guard let http = response as? HTTPURLResponse,
+                  http.statusCode == 200 || http.statusCode == 206 else {
+                throw StoragePlaybackError.badResponse
+            }
+
+            var totalLength: Int64?
+            if http.statusCode == 206,
+               let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
+               let rangePart = contentRange.split(separator: " ").last,
+               let slash = rangePart.firstIndex(of: "/") {
+                let startText = rangePart[rangePart.startIndex..<slash].split(separator: "-").first ?? ""
+                if let start = Int64(startText), start != offset {
+                    throw StoragePlaybackError.badResponse
+                }
+                totalLength = Int64(rangePart[rangePart.index(after: slash)...])
+            } else if http.statusCode == 200 {
+                totalLength = offset + Int64(data.count)
+            }
+
+            if let info = request.contentInformationRequest {
+                info.isByteRangeAccessSupported = http.statusCode == 206
+                info.contentType = http.mimeType ?? "audio/mpeg"
+                if let totalLength, totalLength >= 0 { info.contentLength = totalLength }
+            }
+            if let dataRequest {
+                dataRequest.respond(with: wantsAll ? data : data.prefix(length))
+            }
+            request.finishLoading()
+        } catch {
+            if error is CancellationError {
+                request.finishLoading()
+            } else {
+                request.finishLoading(with: error)
+            }
+        }
+    }
+}
+
 // MARK: - Playback (AVPlayer; HTTPS-only enclosure check is unchanged)
 
 @MainActor
@@ -1022,6 +1828,7 @@ private final class EpisodePlayback: ObservableObject {
     private var failureObserver: NSObjectProtocol?
     private var routeObserver: NSObjectProtocol?
     private var interruptionObserver: NSObjectProtocol?
+    private var storageLoader: StorageResourceLoader?
     private var shouldResumeAfterInterruption = false
     private var audioSessionActive = false
 
@@ -1062,7 +1869,27 @@ private final class EpisodePlayback: ObservableObject {
             status = "该单集没有可播放的 HTTP(S) 音频地址。"
             return
         }
-        let item = AVPlayerItem(url: url)
+        install(AVPlayerItem(url: url))
+    }
+
+    /// Network storage playback goes through a custom scheme. The real URL and credentials
+    /// are resolved only inside StorageResourceLoader, never in StoredFeed/JSON/UI state.
+    func playStorage(source: StoredNetworkSource, entry: WebDavEntry, path: String) {
+        reset()
+        title = entry.name
+        guard let assetURL = StoragePlaybackURL.make(sourceID: source.id, path: path) else {
+            status = "该音频文件没有可播放的地址。"
+            return
+        }
+        let asset = AVAsset(url: assetURL)
+        let loader = StorageResourceLoader()
+        asset.resourceLoader.setDelegate(loader, queue: .global(qos: .userInitiated))
+        // AVAssetResourceLoader.delegate is weak; keep the loader alive for this item.
+        storageLoader = loader
+        install(AVPlayerItem(asset: asset))
+    }
+
+    private func install(_ item: AVPlayerItem) {
         let id = itemID
         player.replaceCurrentItem(with: item)
         canPlay = true
@@ -1133,6 +1960,7 @@ private final class EpisodePlayback: ObservableObject {
         player.pause()
         player.currentItem?.cancelPendingSeeks()
         player.replaceCurrentItem(with: nil)
+        storageLoader = nil
         deactivateAudioSession()
         title = nil
         status = ""
