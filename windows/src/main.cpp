@@ -7,10 +7,15 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include <cstdio>
+#include <cstdint>
 #include <cwchar>
 #include <cwctype>
 #include <string>
 #include <vector>
+
+#include "feed_parser.h"
+#include "http_client.h"
+#include "local_store.h"
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Media.Core.h>
@@ -35,6 +40,15 @@ constexpr int kSeekForward = 1007;
 constexpr int kStatus = 1008;
 constexpr int kRateDown = 1009;
 constexpr int kRateUp = 1010;
+constexpr int kFeedUrlEdit = 1011;
+constexpr int kAddFeed = 1012;
+constexpr int kRefresh = 1013;
+constexpr int kFeedList = 1014;
+constexpr int kEpisodeList = 1015;
+constexpr int kQueueList = 1016;
+constexpr int kQueueUp = 1017;
+constexpr int kQueueDown = 1018;
+constexpr int kQueueRemove = 1019;
 constexpr UINT kPositionMessage = WM_APP + 1;
 
 HINSTANCE g_instance = nullptr;
@@ -46,7 +60,30 @@ HWND g_status = nullptr;
 HWND g_window = nullptr;
 std::vector<double> g_rates = {0.75, 1.0, 1.25, 1.5, 2.0};
 size_t g_rate_index = 1;
-const wchar_t *kWindowClass = L"PodcastWindowsW0";
+const wchar_t *kWindowClass = L"PodcastWindowsW1";
+podcast::LocalStore g_store;
+PlayQueue g_queue;
+std::string g_selected_feed;
+std::vector<podcast::Episode> g_visible_episodes;
+
+HWND control(HWND parent, int id) { return GetDlgItem(parent, id); }
+
+void fill_list(HWND list, const std::vector<std::wstring>& values) {
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    for (const auto& value : values) SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(value.c_str()));
+}
+
+int list_selection(HWND list) {
+    return static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
+}
+
+std::wstring wide(const std::string& value) {
+    return std::wstring(value.begin(), value.end());
+}
+
+std::string narrow(const std::wstring& value) {
+    return std::string(value.begin(), value.end());
+}
 
 void set_status(const std::wstring &text) {
     if (g_status) SetWindowTextW(g_status, text.c_str());
@@ -149,29 +186,146 @@ void open_local_file(HWND hwnd) {
     }
 }
 
+std::string feed_key(const std::string& url) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (unsigned char c : url) { hash ^= c; hash *= 1099511628211ULL; }
+    char buffer[17];
+    std::snprintf(buffer, sizeof(buffer), "%016llx", static_cast<unsigned long long>(hash));
+    return std::string(buffer);
+}
+
+void refresh_feed_lists(HWND hwnd) {
+    std::vector<std::wstring> names;
+    for (const auto& feed : g_store.feeds())
+        names.push_back(wide(feed.title.empty() ? feed.url : feed.title));
+    fill_list(control(hwnd, kFeedList), names);
+}
+
+void refresh_episodes(HWND hwnd) {
+    g_visible_episodes.clear();
+    for (const auto& e : g_store.episodes())
+        if (e.feed_id == g_selected_feed) g_visible_episodes.push_back(e);
+    std::vector<std::wstring> titles;
+    for (const auto& e : g_visible_episodes) titles.push_back(wide(e.title));
+    fill_list(control(hwnd, kEpisodeList), titles);
+}
+
+void refresh_queue(HWND hwnd) {
+    std::vector<std::wstring> labels;
+    for (const auto& id : g_queue.items()) labels.push_back(wide(id));
+    fill_list(control(hwnd, kQueueList), labels);
+}
+
+void add_feed(HWND hwnd) {
+    wchar_t text[2048] = {};
+    GetWindowTextW(control(hwnd, kFeedUrlEdit), text, 2048);
+    const std::string url = narrow(text);
+    if (url.compare(0, 7, "http://") != 0 && url.compare(0, 8, "https://") != 0) {
+        set_status(L"订阅地址须为 http(s)");
+        return;
+    }
+    set_status(L"正在获取订阅…");
+    podcast::HttpResponse response;
+    if (!podcast::http_get(url, 4 * 1024 * 1024, response)) {
+        set_status(L"订阅获取失败");
+        return;
+    }
+    const std::string xml(response.body.begin(), response.body.end());
+    podcast::ParsedFeed parsed;
+    if (!podcast::parse_feed(xml, parsed)) {
+        set_status(L"订阅不是有效的 RSS/Atom");
+        return;
+    }
+    podcast::Feed feed;
+    feed.id = feed_key(url);
+    feed.url = url;
+    feed.title = parsed.title;
+    g_store.addOrUpdateFeed(feed);
+    std::vector<podcast::Episode> episodes;
+    for (const auto& p : parsed.episodes) {
+        podcast::Episode e;
+        e.id = p.id;
+        e.feed_id = feed.id;
+        e.title = p.title;
+        e.audio_url = p.audio_url;
+        e.published_at = p.published_at;
+        episodes.push_back(e);
+    }
+    g_store.setEpisodes(feed.id, episodes);
+    g_store.save();
+    g_selected_feed = feed.id;
+    refresh_feed_lists(hwnd);
+    refresh_episodes(hwnd);
+    set_status(L"已添加订阅：" + wide(parsed.title));
+}
+
+void refresh_all_feeds(HWND hwnd) {
+    for (const auto& feed : g_store.feeds()) {
+        podcast::HttpResponse response;
+        if (!podcast::http_get(feed.url, 4 * 1024 * 1024, response)) continue;
+        const std::string xml(response.body.begin(), response.body.end());
+        podcast::ParsedFeed parsed;
+        if (!podcast::parse_feed(xml, parsed)) continue;
+        std::vector<podcast::Episode> episodes;
+        for (const auto& p : parsed.episodes) {
+            podcast::Episode e; e.id = p.id; e.feed_id = feed.id;
+            e.title = p.title; e.audio_url = p.audio_url; e.published_at = p.published_at;
+            episodes.push_back(e);
+        }
+        g_store.setEpisodes(feed.id, episodes);
+    }
+    g_store.save();
+    refresh_episodes(hwnd);
+    set_status(L"订阅已刷新");
+}
+
 LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_CREATE: {
         g_window = hwnd;
         const DWORD style = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
+        const DWORD list_style = LBS_NOTIFY | LBS_HASSTRINGS | WS_BORDER | WS_VSCROLL | WS_TABSTOP;
+        // Row 1: subscription URL + add/refresh.
         CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER,
-                        16, 16, 520, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUrlEdit)), g_instance, nullptr);
+                        16, 12, 560, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFeedUrlEdit)), g_instance, nullptr);
         struct Button { int id; const wchar_t *label; int x; int y; int width; };
+        const Button top[] = {
+            {kAddFeed, L"添加订阅", 586, 12, 96},
+            {kRefresh, L"刷新", 690, 12, 72},
+            {kLoadUrl, L"加载音频 URL", 772, 12, 128},
+        };
+        for (const auto& b : top)
+            CreateWindowExW(0, L"BUTTON", b.label, style | BS_PUSHBUTTON, b.x, b.y, b.width, 24,
+                            hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(b.id)), g_instance, nullptr);
+        // Row 2: direct audio URL + local file + playback controls.
+        CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER,
+                        16, 44, 520, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUrlEdit)), g_instance, nullptr);
         const Button buttons[] = {
-            {kLoadUrl, L"加载 URL", 16, 52, 96},
-            {kOpenLocal, L"打开本地文件", 122, 52, 120},
-            {kPlayPause, L"播放 / 暂停", 252, 52, 112},
-            {kStop, L"停止", 374, 52, 72},
-            {kSeekBack, L"-15 秒", 456, 52, 76},
-            {kSeekForward, L"+30 秒", 542, 52, 76},
-            {kRateDown, L"慢速", 16, 88, 76},
-            {kRateUp, L"快速", 102, 88, 76},
+            {kOpenLocal, L"打开本地文件", 546, 44, 120},
+            {kPlayPause, L"播放 / 暂停", 676, 44, 104},
+            {kStop, L"停止", 788, 44, 64},
+            {kSeekBack, L"-15 秒", 860, 44, 72},
+            {kSeekForward, L"+30 秒", 940, 44, 72},
+            {kRateDown, L"慢速", 16, 78, 72},
+            {kRateUp, L"快速", 96, 78, 72},
+            {kQueueUp, L"队列上移", 820, 78, 88},
+            {kQueueDown, L"队列下移", 916, 78, 88},
+            {kQueueRemove, L"移出队列", 1012, 78, 88},
         };
         for (const auto &b : buttons)
             CreateWindowExW(0, L"BUTTON", b.label, style | BS_PUSHBUTTON,
-                            b.x, b.y, b.width, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(b.id)), g_instance, nullptr);
+                            b.x, b.y, b.width, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(b.id)), g_instance, nullptr);
+        CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", list_style,
+                        16, 118, 280, 340, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFeedList)), g_instance, nullptr);
+        CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", list_style,
+                        306, 118, 500, 340, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kEpisodeList)), g_instance, nullptr);
+        CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", list_style,
+                        816, 118, 284, 340, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kQueueList)), g_instance, nullptr);
         g_status = CreateWindowExW(0, L"STATIC", L"就绪", WS_CHILD | WS_VISIBLE,
-                                   16, 132, 600, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kStatus)), g_instance, nullptr);
+                                   16, 470, 1084, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kStatus)), g_instance, nullptr);
+        g_store.load();
+        refresh_feed_lists(hwnd);
+        refresh_queue(hwnd);
         return 0;
     }
     case kPositionMessage:
@@ -206,6 +360,42 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             if (id == kRateUp && g_rate_index + 1 < g_rates.size()) ++g_rate_index;
             g_session.PlaybackRate(g_rates[g_rate_index]);
             refresh_status();
+        } else if (id == kAddFeed) {
+            add_feed(hwnd);
+        } else if (id == kRefresh) {
+            refresh_all_feeds(hwnd);
+        } else if (id == kQueueUp || id == kQueueDown || id == kQueueRemove) {
+            const int selected = list_selection(control(hwnd, kQueueList));
+            if (selected >= 0 && static_cast<std::size_t>(selected) < g_queue.items().size()) {
+                const std::string item = g_queue.items()[selected];
+                if (id == kQueueRemove) g_queue.remove(item);
+                else g_queue.move(item, id == kQueueUp);
+                g_store.setQueue(std::vector<std::string>(g_queue.items().begin(), g_queue.items().end()));
+                g_store.save();
+                refresh_queue(hwnd);
+            }
+        }
+        return 0;
+    }
+    case WM_NOTIFY: {
+        const auto* header = reinterpret_cast<const NMHDR*>(lparam);
+        if (header->idFrom == kFeedList && header->code == LBN_SELCHANGE) {
+            const int selected = list_selection(control(hwnd, kFeedList));
+            if (selected >= 0 && static_cast<std::size_t>(selected) < g_store.feeds().size()) {
+                g_selected_feed = g_store.feeds()[selected].id;
+                refresh_episodes(hwnd);
+            }
+        } else if (header->idFrom == kEpisodeList && header->code == LBN_DBLCLK) {
+            const int selected = list_selection(control(hwnd, kEpisodeList));
+            if (selected >= 0 && static_cast<std::size_t>(selected) < g_visible_episodes.size()) {
+                const auto& episode = g_visible_episodes[selected];
+                g_queue.set_current(episode.id);
+                g_store.setProgress(episode.id, 0, false);
+                g_store.setQueue(std::vector<std::string>(g_queue.items().begin(), g_queue.items().end()));
+                g_store.save();
+                refresh_queue(hwnd);
+                load_uri(episode.audio_url);
+            }
         }
         return 0;
     }
@@ -235,7 +425,7 @@ int run(int argc, wchar_t **argv) {
 
     HWND hwnd = CreateWindowExW(0, kWindowClass, L"Podcast W0",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
-        640, 240, nullptr, nullptr, g_instance, nullptr);
+        1120, 540, nullptr, nullptr, g_instance, nullptr);
     if (!hwnd) return 4;
 
     bool smoke = false;
