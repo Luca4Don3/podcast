@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -77,47 +79,53 @@ fun MiniPlayer(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
     ) {
-        Column(Modifier.fillMaxWidth()) {
-            Row(Modifier.fillMaxWidth().padding(end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Row(
-                    Modifier.weight(1f)
-                        .clickable(role = Role.Button, onClickLabel = "展开播放器", onClick = onExpand)
-                        .heightIn(min = 48.dp)
-                        .padding(start = 12.dp, top = 4.dp, bottom = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    CoverImage(url = state.artworkUrl, modifier = Modifier.size(38.dp), corner = 8)
-                    Column(Modifier.weight(1f)) {
-                        Text(state.title, style = MaterialTheme.typography.titleSmall,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        val subtitle = when {
-                            state.error != null -> "播放失败"
-                            state.buffering -> "正在缓冲"
-                            state.isLive -> "直播音源"
-                            else -> state.podcastTitle
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val narrow = maxWidth < 240.dp
+            val showExpandIcon = maxWidth >= 320.dp && LocalDensity.current.fontScale < 1.45f
+            Column(Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth().padding(end = if (narrow) 0.dp else 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        Modifier.weight(1f)
+                            .clickable(role = Role.Button, onClickLabel = "展开播放器", onClick = onExpand)
+                            .heightIn(min = 48.dp)
+                            .padding(start = if (narrow) 8.dp else 12.dp, top = 4.dp, bottom = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (!narrow) {
+                            CoverImage(url = state.artworkUrl, modifier = Modifier.size(38.dp), corner = 8)
                         }
-                        if (subtitle.isNotBlank()) {
-                            Text(
-                                subtitle,
-                                modifier = if (state.error != null || state.buffering) {
-                                    Modifier.semantics { liveRegion = LiveRegionMode.Polite }
-                                } else Modifier,
-                                color = if (state.error != null) MaterialTheme.colorScheme.error
-                                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                        Column(Modifier.weight(1f)) {
+                            Text(state.title, style = MaterialTheme.typography.titleSmall,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            val subtitle = when {
+                                state.error != null -> "播放失败"
+                                state.buffering -> "正在缓冲"
+                                state.isLive -> "直播音源"
+                                else -> state.podcastTitle
+                            }
+                            if (subtitle.isNotBlank()) {
+                                Text(
+                                    subtitle,
+                                    modifier = if (state.error != null || state.buffering) {
+                                        Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+                                    } else Modifier,
+                                    color = if (state.error != null) MaterialTheme.colorScheme.error
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
+                        if (showExpandIcon) Icon(Icons.Filled.KeyboardArrowUp, contentDescription = null)
                     }
-                    Icon(Icons.Filled.KeyboardArrowUp, contentDescription = null)
+                    IconButton(onClick = onToggle, modifier = Modifier.size(48.dp)) { PlaybackIcon(state) }
                 }
-                IconButton(onClick = onToggle, modifier = Modifier.size(48.dp)) { PlaybackIcon(state) }
-            }
-            if (!state.isLive && state.durationMs > 0) {
-                // 迷你播放器仅展示进度；不要把它变成不可操作的 TalkBack 滑块。
-                ProgressLine(state)
+                if (!state.isLive && state.durationMs > 0) {
+                    // 迷你播放器仅展示进度；不要把它变成不可操作的 TalkBack 滑块。
+                    ProgressLine(state)
+                }
             }
         }
     }
@@ -134,17 +142,28 @@ fun PlayerSheet(
     onSpeed: (Float) -> Unit,
     onSleepTimer: (Int) -> Unit,
 ) {
-    BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
-        val compact = maxHeight < 480.dp || maxWidth <= 360.dp || LocalDensity.current.fontScale >= 1.45f
-        val split = maxWidth >= 560.dp && maxHeight < 480.dp
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val availableWidth = maxWidth
+        val largeText = LocalDensity.current.fontScale >= 1.45f
+        val short = maxHeight < 480.dp
+        val compact = short || availableWidth <= 360.dp || largeText
+        // Use the width of this sheet/pane, not the width of the window around it.
+        val splitMinWidth = if (largeText) 720.dp else 600.dp
+        val split = constraints.hasBoundedWidth && availableWidth >= splitMinWidth
+        val inlineArtwork = compact && availableWidth >= (if (largeText) 400.dp else 300.dp)
         val colors = MaterialTheme.colorScheme
-        val bodyScroll = rememberScrollState()
+        val scrollState = rememberScrollState()
+        // An unbounded host (e.g. a scrolling pane) must provide its own scrolling.
+        val scroll = if (constraints.hasBoundedHeight) Modifier.verticalScroll(scrollState) else Modifier
         Column(
-            Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(colors.secondaryContainer, colors.surface))),
+            Modifier.fillMaxWidth()
+                .background(Brush.verticalGradient(listOf(colors.secondaryContainer, colors.surface)))
+                .then(scroll),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Row(
-                Modifier.widthIn(max = 760.dp).fillMaxWidth().padding(horizontal = 8.dp),
+                Modifier.widthIn(max = 760.dp).fillMaxWidth()
+                    .padding(horizontal = if (availableWidth < 180.dp) 0.dp else 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = onCollapse, modifier = Modifier.size(48.dp)) {
@@ -155,13 +174,18 @@ fun PlayerSheet(
                 SleepMenu(state.sleepTimerSeconds, onSleepTimer)
             }
 
+            val horizontalPadding = when {
+                availableWidth < 180.dp -> 0.dp
+                availableWidth <= 360.dp -> 8.dp
+                else -> 16.dp
+            }
             val body = Modifier.widthIn(max = if (split) 760.dp else 480.dp).fillMaxWidth()
-                .weight(1f, fill = false).verticalScroll(bodyScroll).padding(horizontal = 16.dp, vertical = 12.dp)
+                .padding(horizontal = horizontalPadding, vertical = if (compact) 8.dp else 12.dp)
             if (split) {
-                Row(body, horizontalArrangement = Arrangement.spacedBy(24.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(body, horizontalArrangement = Arrangement.spacedBy(24.dp), verticalAlignment = Alignment.Top) {
                     Column(Modifier.weight(2f), horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CoverImage(state.artworkUrl, Modifier.size(96.dp), corner = 18)
+                        CoverImage(state.artworkUrl, Modifier.size(if (compact) 96.dp else 160.dp), corner = 18)
                         PlayerTitle(state, centered = true)
                     }
                     Column(Modifier.weight(3f), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -171,14 +195,15 @@ fun PlayerSheet(
             } else {
                 Column(body, horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 14.dp)) {
-                    if (compact) {
+                    if (inlineArtwork) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             CoverImage(state.artworkUrl, Modifier.size(60.dp), corner = 12)
                             Column(Modifier.weight(1f)) { PlayerTitle(state, centered = false) }
                         }
                     } else {
-                        CoverImage(state.artworkUrl, Modifier.size(208.dp), corner = 24)
+                        CoverImage(state.artworkUrl, Modifier.size(if (compact) 64.dp else 208.dp),
+                            corner = if (compact) 12 else 24)
                         PlayerTitle(state, centered = true)
                     }
                     PlayerControls(state, onToggle, onSeek, onSkipBack, onSkipForward, onSpeed)
@@ -193,16 +218,16 @@ private fun PlayerTitle(state: PlayerUiState, centered: Boolean) {
     val align = if (centered) TextAlign.Center else TextAlign.Start
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(state.title, style = MaterialTheme.typography.titleLarge, textAlign = align,
-            modifier = Modifier.fillMaxWidth().semantics { heading() }, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            modifier = Modifier.fillMaxWidth().semantics { heading() })
         if (state.isLive || state.podcastTitle.isNotBlank()) {
             Text(if (state.isLive) "直播音源" else state.podcastTitle,
                 modifier = Modifier.fillMaxWidth(), textAlign = align,
-                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PlayerControls(
     state: PlayerUiState,
@@ -242,18 +267,24 @@ private fun PlayerControls(
     if (state.error != null) {
         Button(onClick = onToggle, modifier = Modifier.padding(top = 6.dp).heightIn(min = 48.dp)) { Text("重试播放") }
     } else {
-        Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
-            verticalAlignment = Alignment.CenterVertically) {
+        FlowRow(
+            Modifier.fillMaxWidth().padding(top = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             if (!state.isLive) {
-                IconButton(onClick = onSkipBack, enabled = canSeek, modifier = Modifier.size(48.dp)) {
+                IconButton(onClick = onSkipBack, enabled = canSeek,
+                    modifier = Modifier.size(48.dp).align(Alignment.CenterVertically)) {
                     Icon(Icons.Filled.FastRewind, contentDescription = "后退")
                 }
             }
-            FilledIconButton(onClick = onToggle, enabled = state.title.isNotBlank(), modifier = Modifier.size(60.dp)) {
+            FilledIconButton(onClick = onToggle, enabled = state.title.isNotBlank(),
+                modifier = Modifier.size(60.dp).align(Alignment.CenterVertically)) {
                 PlaybackIcon(state, Modifier.size(32.dp))
             }
             if (!state.isLive) {
-                IconButton(onClick = onSkipForward, enabled = canSeek, modifier = Modifier.size(48.dp)) {
+                IconButton(onClick = onSkipForward, enabled = canSeek,
+                    modifier = Modifier.size(48.dp).align(Alignment.CenterVertically)) {
                     Icon(Icons.Filled.FastForward, contentDescription = "前进")
                 }
             }
@@ -311,7 +342,7 @@ private fun SeekBar(state: PlayerUiState, onSeek: (Long) -> Unit) {
             if (target != null) onSeek(target.coerceIn(0, duration))
         },
         valueRange = 0f..duration.toFloat(),
-        modifier = Modifier.fillMaxWidth().semantics {
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics {
             contentDescription = "播放进度"
             stateDescription = description
         },
@@ -320,13 +351,17 @@ private fun SeekBar(state: PlayerUiState, onSeek: (Long) -> Unit) {
     TimeLabels(position, duration, merged = true)
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TimeLabels(position: Long, duration: Long, merged: Boolean) {
-    Row(Modifier.fillMaxWidth().then(if (merged) Modifier.clearAndSetSemantics {} else Modifier),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    FlowRow(
+        Modifier.fillMaxWidth().then(if (merged) Modifier.clearAndSetSemantics {} else Modifier),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
         val style = MaterialTheme.typography.labelSmall
-        Text(Dates.formatDurationMs(position), Modifier.weight(1f), style = style)
-        Text(Dates.formatDurationMs(duration), Modifier.weight(1f), style = style, textAlign = TextAlign.End)
+        Text(Dates.formatDurationMs(position), Modifier.padding(end = 8.dp), style = style)
+        Text(Dates.formatDurationMs(duration), style = style)
     }
 }
 

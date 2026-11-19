@@ -1,10 +1,10 @@
 package com.podcastapp.ui
 
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -45,6 +45,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -59,6 +61,13 @@ import com.podcastapp.data.ServiceLocator
 import com.podcastapp.data.Session
 import com.podcastapp.data.filemedia.FileMediaSession
 import com.podcastapp.playback.PlaybackHolder
+import com.podcastapp.ui.adaptive.AdaptiveWindow
+import com.podcastapp.ui.adaptive.FoldFeature
+import com.podcastapp.ui.adaptive.NavigationMode
+import com.podcastapp.ui.adaptive.PlacePanes
+import com.podcastapp.ui.adaptive.ScreenProfile
+import com.podcastapp.ui.adaptive.ScreenSize
+import com.podcastapp.ui.adaptive.ScreenSplit
 import com.podcastapp.ui.auth.AuthScreen
 import com.podcastapp.ui.discover.DiscoverScreen
 import com.podcastapp.ui.filemedia.FileMediaScreen
@@ -82,7 +91,7 @@ private val tabs = listOf(
 
 /** 登录前也可打开服务器设置；等待本地会话加载后再显示页面。 */
 @Composable
-fun PodcastAppRoot(appViewModel: AppViewModel = viewModel()) {
+internal fun PodcastAppRoot(folds: List<FoldFeature> = emptyList(), appViewModel: AppViewModel = viewModel()) {
     val session by appViewModel.session.collectAsState()
     val toast by appViewModel.toast.collectAsState()
     val busy by appViewModel.busy.collectAsState()
@@ -95,28 +104,37 @@ fun PodcastAppRoot(appViewModel: AppViewModel = viewModel()) {
         }
     }
 
-    Scaffold(snackbarHost = { SnackbarHost(snackbarHost) }) { padding ->
-        Box(
-            Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .consumeWindowInsets(padding),
-        ) {
-            val current = session
-            when {
-                current == null -> CircularProgressIndicator(Modifier.align(Alignment.Center))
-                !current.isLoggedIn -> AuthScreen(viewModel = appViewModel, busy = busy, session = current)
-                else -> key(current.baseUrl, current.userId, current.loginId) {
-                    MainShell(appViewModel = appViewModel, session = current, busy = busy)
-                }
+    AdaptiveWindow(folds) { profile ->
+        val current = session
+        if (current != null && current.isLoggedIn) {
+            key(current.baseUrl, current.userId, current.loginId) {
+                MainShell(appViewModel, current, busy, profile, snackbarHost)
             }
+        } else {
+            PlacePanes(profile.singlePane, main = {
+                Scaffold(
+                    snackbarHost = { SnackbarHost(snackbarHost) },
+                    contentWindowInsets = WindowInsets(0, 0, 0, 0),
+                ) { padding ->
+                    Box(Modifier.fillMaxSize().padding(padding)) {
+                        if (current == null) CircularProgressIndicator(Modifier.align(Alignment.Center))
+                        else AuthScreen(viewModel = appViewModel, busy = busy, session = current)
+                    }
+                }
+            })
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MainShell(appViewModel: AppViewModel, session: Session, busy: Boolean) {
+private fun MainShell(
+    appViewModel: AppViewModel,
+    session: Session,
+    busy: Boolean,
+    profile: ScreenProfile,
+    snackbarHost: SnackbarHostState,
+) {
     val navController = rememberNavController()
     val playerViewModel: PlayerViewModel = viewModel()
     val playerState by playerViewModel.state.collectAsStateWithLifecycle()
@@ -146,8 +164,36 @@ private fun MainShell(appViewModel: AppViewModel, session: Session, busy: Boolea
         showPlayer = true
     }
 
-    BoxWithConstraints(Modifier.fillMaxSize()) {
-        val rail = useSideNavigation(maxWidth.value, maxHeight.value)
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    val split = profile.split
+    val primary = when (split) {
+        is ScreenSplit.LeftRight -> if (rtl) split.right else split.left
+        is ScreenSplit.Tabletop -> split.top
+        null -> profile.singlePane
+    }
+    val secondary = when (split) {
+        is ScreenSplit.LeftRight -> if (rtl) split.left else split.right
+        is ScreenSplit.Tabletop -> split.bottom
+        null -> null
+    }
+    val rail = primary.navigation == NavigationMode.RAIL
+    val narrow = primary.size == ScreenSize.NARROW_TALL || primary.widthDp < 360f
+    val playerInMainPane = profile.avoidsFold && secondary == null && showPlayer
+    val player: @Composable (() -> Unit) -> Unit = { collapse ->
+        PlayerSheet(
+            state = playerState,
+            onCollapse = collapse,
+            onToggle = playerViewModel::togglePlayPause,
+            onSeek = playerViewModel::seek,
+            onSkipBack = playerViewModel::skipBack,
+            onSkipForward = playerViewModel::skipForward,
+            onSpeed = playerViewModel::setSpeed,
+            onSleepTimer = playerViewModel::setSleepTimer,
+        )
+    }
+
+    PlacePanes(primary, secondary, main = {
+      Box(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxSize()) {
             if (rail) {
                 NavigationRail(windowInsets = WindowInsets(0, 0, 0, 0)) {
@@ -163,6 +209,7 @@ private fun MainShell(appViewModel: AppViewModel, session: Session, busy: Boolea
             }
             Scaffold(
                 modifier = Modifier.weight(1f),
+                snackbarHost = { SnackbarHost(snackbarHost) },
                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 bottomBar = {
             Column {
@@ -188,7 +235,7 @@ private fun MainShell(appViewModel: AppViewModel, session: Session, busy: Boolea
                         }
                     }
                 }
-                if (playerState.title.isNotBlank()) {
+                if (secondary == null && playerState.title.isNotBlank()) {
                     MiniPlayer(
                         state = playerState,
                         onExpand = { showPlayer = true },
@@ -200,8 +247,9 @@ private fun MainShell(appViewModel: AppViewModel, session: Session, busy: Boolea
                         NavigationBarItem(
                             selected = selectedRoute == tab.route,
                             onClick = { openTab(tab.route) },
-                            icon = { Icon(tab.icon, contentDescription = null) },
+                            icon = { Icon(tab.icon, contentDescription = if (narrow && selectedRoute != tab.route) tab.label else null) },
                             label = { NavigationLabel(tab.label) },
+                            alwaysShowLabel = !narrow,
                         )
                     }
                 }
@@ -262,26 +310,37 @@ private fun MainShell(appViewModel: AppViewModel, session: Session, busy: Boolea
         }
     }
         }
-    }
+        if (playerInMainPane) {
+            BackHandler { showPlayer = false }
+            Surface(Modifier.fillMaxSize()) { player { showPlayer = false } }
+        }
+      }
+    }, supporting = {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceContainerLow) {
+            if (showPlayer) {
+                BackHandler { showPlayer = false }
+                player { showPlayer = false }
+            } else {
+                Column(
+                    Modifier.fillMaxSize().padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text("正在播放", style = MaterialTheme.typography.titleMedium)
+                    if (playerState.title.isBlank()) {
+                        Text("选择节目或电台开始播放", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        MiniPlayer(playerState, { showPlayer = true }, playerViewModel::togglePlayPause)
+                    }
+                }
+            }
+        }
+    })
 
-    if (showPlayer) {
+    if (showPlayer && !profile.avoidsFold && secondary == null) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ModalBottomSheet(
-            onDismissRequest = { showPlayer = false },
-            sheetState = sheetState,
-        ) {
-            PlayerSheet(
-                state = playerState,
-                onCollapse = {
-                    scope.launch { sheetState.hide() }.invokeOnCompletion { showPlayer = false }
-                },
-                onToggle = playerViewModel::togglePlayPause,
-                onSeek = playerViewModel::seek,
-                onSkipBack = playerViewModel::skipBack,
-                onSkipForward = playerViewModel::skipForward,
-                onSpeed = playerViewModel::setSpeed,
-                onSleepTimer = playerViewModel::setSleepTimer,
-            )
+        ModalBottomSheet(onDismissRequest = { showPlayer = false }, sheetState = sheetState) {
+            player { scope.launch { sheetState.hide() }.invokeOnCompletion { showPlayer = false } }
         }
     }
 }

@@ -12,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.podcastapp.playback.NotificationPermission
 import com.podcastapp.ui.PodcastAppRoot
+import com.podcastapp.ui.adaptive.rememberFoldingFeatures
 import com.podcastapp.ui.theme.PodcastAppTheme
 
 /**
@@ -43,7 +44,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             PodcastAppTheme {
-                PodcastAppRoot()
+                PodcastAppRoot(folds = rememberFoldingFeatures(this@MainActivity))
             }
         }
     }

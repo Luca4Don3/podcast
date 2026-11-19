@@ -20,8 +20,8 @@ plugins {
 }
 
 // Linux-style release number. Android's independent upgrade counter always increases.
-val podcastVersion = "1.4.2"
-val podcastVersionCode = 14
+val podcastVersion = "1.4.3"
+val podcastVersionCode = 15
 require(podcastVersion.matches(Regex("(?:0|[1-9][0-9]*)[.](?:0|[1-9][0-9]*)(?:[.][1-9][0-9]*|-rc[1-9][0-9]*)?"))) {
     "Expected Linux-style podcast version (for example 1.4, 1.4.1 or 1.5-rc1)"
 }
@@ -186,6 +186,7 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
     implementation(libs.androidx.navigation.compose)
+    implementation(libs.androidx.window)
     implementation(libs.androidx.media3.exoplayer)
     implementation("androidx.media3:media3-exoplayer-hls:${libs.versions.media3.get()}")
     implementation(libs.androidx.media3.session)
