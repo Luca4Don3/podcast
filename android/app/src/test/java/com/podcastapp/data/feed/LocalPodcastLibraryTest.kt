@@ -383,6 +383,72 @@ class LocalPodcastLibraryTest {
         )
     }
 
+    @Test fun digestCredentialsProduceNoStaticAuthorizationHeader() {
+        assertTrue(credentialHeaders(SourceCredentials(CredentialKind.DIGEST, "u", "pw")).isEmpty())
+        assertTrue(digestEnabled(SourceCredentials(CredentialKind.DIGEST, "u", "pw"), SourceTransport()))
+        assertTrue(digestEnabled(SourceCredentials(), SourceTransport(digest = true)))
+        assertFalse(digestEnabled(SourceCredentials(), SourceTransport()))
+    }
+
+    @Test fun requireHttpsRejectsHttpFeedBeforeAnyFetch() {
+        var fetched = false
+        val library = LocalPodcastLibrary(
+            tempDir(),
+            { _, _, _ -> fetched = true; error("must not fetch") },
+            store(),
+            1,
+        )
+        val result = runBlocking {
+            library.`import`("http://cdn.example.com/local.xml", transport = SourceTransport(requireHttps = true))
+        }
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull()?.message?.contains("requireHttps") == true)
+        assertFalse(fetched)
+    }
+
+    @Test fun requireHttpsRejectsHttpDowngradeRedirect() {
+        assertTrue(resolveRedirect(
+            "https://example.com/a.xml",
+            "http://example.com/b.xml",
+            SourceTransport(requireHttps = true),
+        ).isFailure)
+        assertEquals(
+            "http://example.com/b.xml",
+            resolveRedirect("https://example.com/a.xml", "http://example.com/b.xml").getOrThrow(),
+        )
+    }
+
+    @Test fun refreshUsesSavedTransportAndTransportNeverPersistedInJson() {
+        val dir = tempDir()
+        val credentialStore = store()
+        val seen = ArrayList<SourceTransport>()
+        val library = LocalPodcastLibrary(
+            dir,
+            { _, _, transport -> seen.add(transport); rss("标题") },
+            credentialStore,
+            1,
+        )
+        val transport = SourceTransport(
+            requireHttps = true,
+            customCaPem = "ca-pem-marker",
+            clientCertPem = "cert-pem-marker",
+            clientKeyPem = "key-pem-marker",
+            clientKeyPassword = "key-password-marker",
+            digest = true,
+        )
+        runBlocking {
+            val first = library.`import`(FEED, transport = transport).getOrThrow().single()
+            assertEquals(transport, credentialStore.loadTransport(first.id))
+            seen.clear()
+            library.refresh(first.id).getOrThrow()
+            assertEquals(transport, seen.single())
+        }
+        val json = File(dir, "local_podcast_library.json").readText(Charsets.UTF_8)
+        listOf("ca-pem-marker", "cert-pem-marker", "key-pem-marker", "key-password-marker").forEach {
+            assertFalse("Transport material leaked into JSON: " + it, json.contains(it))
+        }
+    }
+
     private companion object {
         const val FEED = "https://cdn.example.com/local.xml"
     }

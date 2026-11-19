@@ -26,12 +26,13 @@ import org.xml.sax.SAXParseException
 /** 链接所属平台。DIRECT 表示可直接当作 feed 地址使用。 */
 enum class FeedPlatform { DIRECT, APPLE, SPOTIFY, XIAOYUZHOU, XIMALAYA }
 
-/** 公开 feed 的凭据类型：无、HTTP Basic、Bearer Token、请求头 API Key。 */
-enum class CredentialKind { NONE, BASIC, BEARER, API_KEY }
+/** 公开 feed 的凭据类型：无、HTTP Basic、Bearer Token、请求头 API Key、HTTP Digest。 */
+enum class CredentialKind { NONE, BASIC, BEARER, API_KEY, DIGEST }
 
 /**
  * 访问公开 feed 所需的凭据。只进入加密凭据存储，绝不写入 URL 或订阅 JSON。
  * [header] 仅在 [CredentialKind.API_KEY] 时作为请求头名使用。
+ * [CredentialKind.DIGEST] 不生成静态 Authorization，只在服务端 401 挑战后由 DigestAuth 计算。
  */
 data class SourceCredentials(
     val kind: CredentialKind = CredentialKind.NONE,

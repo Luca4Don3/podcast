@@ -12,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
@@ -37,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.podcastapp.data.feed.CredentialKind
 import com.podcastapp.data.feed.SourceCredentials
+import com.podcastapp.data.feed.SourceTransport
 import com.podcastapp.data.feed.platformLabel
 import com.podcastapp.ui.SharedImport
 import com.podcastapp.ui.components.InlineIssue
@@ -63,6 +65,14 @@ fun DiscoverScreen(
     var secret by remember { mutableStateOf("") }
     var headerName by remember { mutableStateOf("X-API-Key") }
     var authMenuExpanded by remember { mutableStateOf(false) }
+    // 传输设置同样只保存在本次组合的局部状态：不进入 ViewModel 的 UI state、不落盘、不使用 rememberSaveable。
+    // 客户端私钥与私钥密码尤其敏感：只在这里短暂驻留，提交后立即清空。
+    var requireHttps by remember { mutableStateOf(false) }
+    var digest by remember { mutableStateOf(false) }
+    var customCaPem by remember { mutableStateOf("") }
+    var clientCertPem by remember { mutableStateOf("") }
+    var clientKeyPem by remember { mutableStateOf("") }
+    var clientKeyPassword by remember { mutableStateOf("") }
     val credentials = when (authKind) {
         CredentialKind.NONE -> SourceCredentials()
         CredentialKind.BASIC -> SourceCredentials(kind = CredentialKind.BASIC, username = username, secret = secret)
@@ -72,11 +82,25 @@ fun DiscoverScreen(
             secret = secret,
             header = headerName.ifBlank { "X-API-Key" },
         )
+        // Digest 只带用户名/口令，不生成静态 Authorization 头；由服务端 401 挑战后再计算。
+        CredentialKind.DIGEST -> SourceCredentials(kind = CredentialKind.DIGEST, username = username, secret = secret)
     }
+    val transport = SourceTransport(
+        requireHttps = requireHttps,
+        customCaPem = customCaPem,
+        clientCertPem = clientCertPem,
+        clientKeyPem = clientKeyPem,
+        clientKeyPassword = clientKeyPassword,
+        digest = digest,
+    )
     val startImport = {
-        val selected = credentials
+        val selectedCredentials = credentials
+        val selectedTransport = transport
+        // 提交后立即清空一次性凭据与敏感传输材料，不留在组合状态里。
         secret = ""
-        viewModel.`import`(selected)
+        clientKeyPem = ""
+        clientKeyPassword = ""
+        viewModel.`import`(selectedCredentials, selectedTransport)
     }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 20.dp),
@@ -131,13 +155,15 @@ fun DiscoverScreen(
                     text = { Text(credentialKindLabel(option)) },
                     onClick = {
                         authKind = option
+                        // 认证方式与传输层的 Digest 开关保持一致。
+                        digest = option == CredentialKind.DIGEST
                         secret = ""
                         authMenuExpanded = false
                     },
                 )
             }
         }
-        if (authKind == CredentialKind.BASIC) {
+        if (authKind == CredentialKind.BASIC || authKind == CredentialKind.DIGEST) {
             OutlinedTextField(
                 value = username,
                 onValueChange = { username = it },
@@ -158,6 +184,7 @@ fun DiscoverScreen(
                             CredentialKind.BASIC -> "密码"
                             CredentialKind.BEARER -> "Bearer Token"
                             CredentialKind.API_KEY -> "API Key"
+                            CredentialKind.DIGEST -> "Digest 密码"
                             CredentialKind.NONE -> ""
                         }
                     )
@@ -179,6 +206,73 @@ fun DiscoverScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
         }
+
+        Text("传输加密（可选）", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+        Text(
+            "要求 HTTPS 时拒绝 http 地址及任何降级到 http 的跳转；跨主机或降级跳转会剥离认证与客户端证书，绝不写入订阅 JSON。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = requireHttps,
+                onCheckedChange = { requireHttps = it },
+                enabled = !state.loading,
+            )
+            Text("要求 HTTPS（禁止 http 与降级跳转）")
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = digest,
+                onCheckedChange = { checked ->
+                    digest = checked
+                    if (checked) {
+                        authKind = CredentialKind.DIGEST
+                    } else if (authKind == CredentialKind.DIGEST) {
+                        authKind = CredentialKind.NONE
+                    }
+                },
+                enabled = !state.loading,
+            )
+            Text("Digest 认证（仅服务端 401 挑战后计算，不发送静态 Authorization 头）")
+        }
+        Text(
+            "自签名或私有 CA 证书需你自行在系统/设备中信任；应用不会关闭证书校验。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = customCaPem,
+            onValueChange = { customCaPem = it },
+            enabled = !state.loading,
+            label = { Text("自定义 CA 证书（PEM）") },
+            placeholder = { Text("-----BEGIN CERTIFICATE-----") },
+            minLines = 3,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = clientCertPem,
+            onValueChange = { clientCertPem = it },
+            enabled = !state.loading,
+            label = { Text("mTLS 客户端证书（PEM）") },
+            placeholder = { Text("-----BEGIN CERTIFICATE-----") },
+            minLines = 3,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        SecureField(
+            value = clientKeyPem,
+            onValueChange = { clientKeyPem = it },
+            enabled = !state.loading,
+            label = "mTLS 客户端私钥（PEM）",
+            modifier = Modifier.fillMaxWidth(),
+        )
+        SecureField(
+            value = clientKeyPassword,
+            onValueChange = { clientKeyPassword = it },
+            enabled = !state.loading,
+            label = "客户端私钥密码（可选）",
+            modifier = Modifier.fillMaxWidth(),
+        )
 
         val error = state.error
         if (error != null) {
@@ -244,11 +338,32 @@ fun DiscoverScreen(
     }
 }
 
+/** 敏感文本输入：掩码显示，值由调用方持有，不进入 ViewModel/持久化状态。 */
+@Composable
+private fun SecureField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        enabled = enabled,
+        label = { Text(label) },
+        visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+        modifier = modifier,
+    )
+}
+
 private fun credentialKindLabel(kind: CredentialKind): String = when (kind) {
     CredentialKind.NONE -> "无"
     CredentialKind.BASIC -> "Basic 用户名密码"
     CredentialKind.BEARER -> "Bearer Token"
     CredentialKind.API_KEY -> "API Key"
+    CredentialKind.DIGEST -> "Digest 用户名密码"
 }
 
 private fun durationLabel(seconds: Int): String {

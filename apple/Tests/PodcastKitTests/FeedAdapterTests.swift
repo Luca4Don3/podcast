@@ -359,6 +359,103 @@ final class FeedAdapterTests: XCTestCase {
         }
     }
 
+    // MARK: - Transport security
+
+    func testSourceTransportDefaultsCodableAndValidation() throws {
+        let transport = SourceTransport()
+        XCTAssertEqual(transport, SourceTransport(requireHttps: false, customCaPem: "", clientCertPem: "",
+                                                 clientKeyPem: "", clientKeyPassword: "", digest: false))
+        let configured = SourceTransport(requireHttps: true, customCaPem: "ca", clientCertPem: "cert",
+                                         clientKeyPem: "key", clientKeyPassword: "pw", digest: true)
+        let roundtrip = try JSONDecoder().decode(SourceTransport.self,
+                                                 from: JSONEncoder().encode(configured))
+        XCTAssertEqual(roundtrip, configured)
+
+        XCTAssertNoThrow(try SourceTransport().validate())
+        XCTAssertNoThrow(try SourceTransport(requireHttps: true, digest: true).validate())
+        let cert = "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----"
+        let key = "-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----"
+        let encrypted = "-----BEGIN ENCRYPTED PRIVATE KEY-----\nQUJD\n-----END ENCRYPTED PRIVATE KEY-----"
+        XCTAssertNoThrow(try SourceTransport(customCaPem: cert).validate())
+        XCTAssertNoThrow(try SourceTransport(clientCertPem: cert, clientKeyPem: key).validate())
+        assertTransportError(.incompleteClientCertificate) {
+            _ = try SourceTransport(clientCertPem: cert).validate()
+        }
+        assertTransportError(.invalidCertificatePEM) {
+            _ = try SourceTransport(customCaPem: "not a pem").validate()
+        }
+        assertTransportError(.invalidPrivateKeyPEM) {
+            _ = try SourceTransport(clientCertPem: cert, clientKeyPem: "not a key").validate()
+        }
+        assertTransportError(.passwordRequired) {
+            _ = try SourceTransport(clientCertPem: cert, clientKeyPem: encrypted).validate()
+        }
+        XCTAssertNoThrow(try SourceTransport(clientCertPem: cert, clientKeyPem: encrypted,
+                                             clientKeyPassword: "pw").validate())
+    }
+
+    func testHTTPSRequirementRejectsHTTPAndDowngrades() {
+        let strict = SourceTransport(requireHttps: true)
+        XCTAssertFalse(strict.allows(URL(string: "http://feeds.example.invalid/rss")!))
+        XCTAssertTrue(strict.allows(URL(string: "https://feeds.example.invalid/rss")!))
+        let https = URL(string: "https://feeds.example.invalid/rss")!
+        XCTAssertFalse(strict.allowsRedirect(from: https,
+                                             to: URL(string: "http://feeds.example.invalid/rss")!))
+        XCTAssertTrue(strict.allowsRedirect(from: https,
+                                            to: URL(string: "https://cdn.example.invalid/rss")!))
+        XCTAssertFalse(SourceTransport().allowsRedirect(
+            from: https, to: URL(string: "http://feeds.example.invalid/rss")!))
+        XCTAssertTrue(SourceTransport.shouldStripCredentials(
+            from: https, to: URL(string: "https://elsewhere.example.invalid/rss")!))
+        XCTAssertTrue(SourceTransport.shouldStripCredentials(
+            from: https, to: URL(string: "http://feeds.example.invalid/rss")!))
+        XCTAssertFalse(SourceTransport.shouldStripCredentials(
+            from: https, to: URL(string: "https://feeds.example.invalid/other")!))
+    }
+
+    func testDigestCredentialNeverProducesStaticHeader() {
+        XCTAssertEqual(SourceCredentials(kind: .digest, username: "alice", secret: "p@ss").httpHeaders, [:])
+        XCTAssertEqual(SourceCredentials(kind: .none).httpHeaders, [:])
+        XCTAssertEqual(SourceCredentials(kind: .basic, username: "alice", secret: "s").httpHeaders,
+                       ["Authorization": "Basic YWxpY2U6cw=="])
+    }
+
+    func testDigestChallengeParsingAndHeaderGeneration() throws {
+        let header = "Basic realm=\"other\", Digest realm=\"feed.example\", nonce=\"abc123nonce\", " +
+                     "qop=\"auth,auth-int\", opaque=\"op-1\", algorithm=MD5"
+        let challenge = try XCTUnwrap(DigestAuthorization.parse(header))
+        XCTAssertEqual(challenge.realm, "feed.example")
+        XCTAssertEqual(challenge.nonce, "abc123nonce")
+        XCTAssertEqual(challenge.qop, "auth")
+        XCTAssertEqual(challenge.opaque, "op-1")
+        XCTAssertNil(DigestAuthorization.parse("Basic realm=\"only\""))
+
+        let authorization = try XCTUnwrap(DigestAuthorization.authorizationHeader(
+            challenge: challenge, username: "alice", password: "p@ss",
+            method: "GET", uri: "/rss.xml", cnonce: "0a4f113b"))
+        XCTAssertTrue(authorization.hasPrefix("Digest "))
+        XCTAssertTrue(authorization.contains("response=\"b02e2c58b702b6a6125fd20d154923d9\""))
+        XCTAssertTrue(authorization.contains("nc=00000001"))
+        XCTAssertTrue(authorization.contains("cnonce=\"0a4f113b\""))
+        XCTAssertFalse(authorization.contains("p@ss"))
+        let legacy = DigestChallenge(realm: "feed.example", nonce: "abc123nonce")
+        let legacyHeader = try XCTUnwrap(DigestAuthorization.authorizationHeader(
+            challenge: legacy, username: "alice", password: "p@ss",
+            method: "GET", uri: "/rss.xml", cnonce: "0a4f113b"))
+        XCTAssertTrue(legacyHeader.contains("response=\"a39c50b04e3429dff6760d8c536095d8\""))
+    }
+
+    private func assertTransportError(_ expected: SourceTransport.ValidationError,
+                                      file: StaticString = #filePath, line: UInt = #line,
+                                      operation: () throws -> Void) {
+        do {
+            try operation()
+            XCTFail("Expected \(expected)", file: file, line: line)
+        } catch {
+            XCTAssertEqual(error as? SourceTransport.ValidationError, expected, file: file, line: line)
+        }
+    }
+
     // MARK: - Helpers
 
     private func assertAdapterError(_ expected: FeedAdapterError,

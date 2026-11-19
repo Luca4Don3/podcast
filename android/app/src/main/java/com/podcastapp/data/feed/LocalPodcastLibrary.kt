@@ -11,6 +11,8 @@ import java.io.InputStream
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.KeyManager
+import javax.net.ssl.SSLContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -120,13 +122,20 @@ internal fun parseDurationSeconds(raw: String): Int {
  * 只接受 http(s) 跳转；相对地址按当前地址解析。
  * 非 http(s)（file/ftp/javascript 等）一律拒绝，且不在这里发起任何请求。
  */
-internal fun resolveRedirect(current: String, location: String): Result<String> = runCatching {
+internal fun resolveRedirect(
+    current: String,
+    location: String,
+    transport: SourceTransport = SourceTransport(),
+): Result<String> = runCatching {
     val target = location.trim()
     require(target.isNotEmpty()) { "跳转地址为空" }
     val next = current.toHttpUrl().resolve(target)
         ?: throw IllegalArgumentException("拒绝非 http(s) 跳转")
     require(next.scheme.equals("http", ignoreCase = true) || next.scheme.equals("https", ignoreCase = true)) {
         "拒绝非 http(s) 跳转"
+    }
+    if (transport.requireHttps) {
+        require(next.scheme.equals("https", ignoreCase = true)) { "requireHttps 已启用，拒绝 http 跳转" }
     }
     PlatformFeedAdapter.normalize(next.toString()).getOrThrow().url
 }
@@ -143,6 +152,8 @@ internal fun credentialHeaders(credentials: SourceCredentials): Map<String, Stri
     CredentialKind.API_KEY -> mapOf(
         (credentials.header.takeIf { it.isNotBlank() } ?: "X-API-Key") to credentials.secret,
     )
+    // Digest 只在 401 挑战之后由 DigestAuthenticator 计算，绝不预置静态 Authorization。
+    CredentialKind.DIGEST -> emptyMap()
 }
 
 /** 只在同 host 且两端都是 https 时沿跳转转发凭据；其余情况一律降级为 NONE。 */
@@ -159,6 +170,17 @@ internal fun credentialsForRedirect(
         next.scheme.equals("https", ignoreCase = true)
     return if (sameHost && https) credentials else SourceCredentials()
 }
+
+/** 跨 host / 端口变化 / https 降级时剥离自定义 CA、客户端证书私钥与 digest。 */
+internal fun transportForRedirect(
+    currentUrl: String,
+    redirectUrl: String,
+    transport: SourceTransport,
+): SourceTransport = SourceTransportSecurity.transportForRedirect(currentUrl, redirectUrl, transport)
+
+/** DIGEST 凭据或来源显式开启 digest 时，才在 401 挑战后计算 Authorization。 */
+internal fun digestEnabled(credentials: SourceCredentials, transport: SourceTransport): Boolean =
+    credentials.kind == CredentialKind.DIGEST || transport.digest
 
 private fun sha256Hex(value: String): String {
     val bytes = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
@@ -181,7 +203,7 @@ private fun sha256Hex(value: String): String {
  */
 class LocalPodcastLibrary private constructor(
     private val storageDir: File,
-    private val fetchText: (String, SourceCredentials) -> String,
+    private val fetchText: (String, SourceCredentials, SourceTransport) -> String,
     private val credentialStore: SourceCredentialStore,
 ) {
 
@@ -191,12 +213,20 @@ class LocalPodcastLibrary private constructor(
         SourceCredentialStore(context.applicationContext),
     )
 
-    /** 仅供 JVM 单测注入临时目录、假响应与假凭据存储。 */
+    /** 仅供 JVM 单测注入临时目录、假响应与假凭据存储（兼容两参数 fetcher）。 */
     internal constructor(
         storageDir: File,
         fetchText: (String, SourceCredentials) -> String,
         credentialStore: SourceCredentialStore,
         @Suppress("UNUSED_PARAMETER") testOnly: Boolean,
+    ) : this(storageDir, { url, credentials, _ -> fetchText(url, credentials) }, credentialStore)
+
+    /** 仅供 JVM 单测注入带传输参数的 fetcher；Int 标记用于区分 JVM 重载。 */
+    internal constructor(
+        storageDir: File,
+        fetchText: (String, SourceCredentials, SourceTransport) -> String,
+        credentialStore: SourceCredentialStore,
+        @Suppress("UNUSED_PARAMETER") testOnlyTransport: Int,
     ) : this(storageDir, fetchText, credentialStore)
 
     /** 兼容只关心 URL 的单测 fetcher；凭据仍会被解析并写入凭据存储。 */
@@ -206,9 +236,9 @@ class LocalPodcastLibrary private constructor(
         @Suppress("UNUSED_PARAMETER") testOnly: Boolean,
     ) : this(
         storageDir,
-        { url, _ -> fetchText(url) },
+        { url, _, _ -> fetchText(url) },
         SourceCredentialStore(InMemoryCredentialStorage()),
-        true,
+        1,
     )
 
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -226,6 +256,7 @@ class LocalPodcastLibrary private constructor(
     suspend fun `import`(
         input: String,
         credentials: SourceCredentials = SourceCredentials(),
+        transport: SourceTransport = SourceTransport(),
     ): Result<List<LocalFeed>> = withContext(Dispatchers.IO) {
         mutex.withLock {
             runCatching {
@@ -234,11 +265,12 @@ class LocalPodcastLibrary private constructor(
                     is FeedReference.WebMetadata -> throw IllegalArgumentException(PUBLIC_FEED_REQUIRED_MESSAGE)
                     is FeedReference.AppleLookup -> {
                         // 官方 lookup 属于其它 host，绝不携带 feed 凭据。
-                        val lookupJson = fetchText(reference.lookupUrl, SourceCredentials())
+                        // Apple lookup 属于其它 host，绝不携带 feed 凭据或传输材料。
+                        val lookupJson = fetchText(reference.lookupUrl, SourceCredentials(), SourceTransport())
                         val feedUrl = parseAppleFeedUrl(lookupJson)
-                        listOf(importRss(feedUrl, reference.url, FeedPlatform.APPLE, credentials))
+                        listOf(importRss(feedUrl, reference.url, FeedPlatform.APPLE, credentials, transport))
                     }
-                    is FeedReference.DirectFeed -> importDirect(reference.url, reference.credentials)
+                    is FeedReference.DirectFeed -> importDirect(reference.url, reference.credentials, transport)
                 }
                 commit(imported)
             }.onFailure { if (it is CancellationException) throw it }
@@ -289,6 +321,7 @@ class LocalPodcastLibrary private constructor(
                     sourceUrl = existing.sourceUrl,
                     platform = existing.platformType(),
                     credentials = credentialStore.load(id),
+                    transport = credentialStore.loadTransport(id),
                 ).copy(importedAt = existing.importedAt)
                 val next = _feeds.value.map { if (it.id == id) updated else it }
                 persist(next)
@@ -298,16 +331,21 @@ class LocalPodcastLibrary private constructor(
         }
     }
 
-    private fun importDirect(url: String, credentials: SourceCredentials): List<LocalFeed> {
-        val xml = fetchText(url, credentials)
+    private fun importDirect(
+        url: String,
+        credentials: SourceCredentials,
+        transport: SourceTransport,
+    ): List<LocalFeed> {
+        SourceTransportSecurity.assertSchemeAllowed(url, transport)
+        val xml = fetchText(url, credentials, transport)
         if (OPML_ROOT.containsMatchIn(xml.take(2048))) {
             val outlines = PlatformFeedAdapter.parseOpml(xml).getOrThrow()
             if (outlines.isEmpty()) throw IllegalArgumentException("OPML 中没有可用的公开 feed 地址")
             return outlines.map { outline ->
-                importRss(outline.xmlUrl, outline.xmlUrl, FeedPlatform.DIRECT, credentials, outline.title)
+                importRss(outline.xmlUrl, outline.xmlUrl, FeedPlatform.DIRECT, credentials, transport, outline.title)
             }
         }
-        return listOf(importRss(url, url, FeedPlatform.DIRECT, credentials, xml = xml))
+        return listOf(importRss(url, url, FeedPlatform.DIRECT, credentials, transport, xml = xml))
     }
 
     private fun parseAppleFeedUrl(lookupJson: String): String {
@@ -322,6 +360,7 @@ class LocalPodcastLibrary private constructor(
         sourceUrl: String,
         platform: FeedPlatform,
         credentials: SourceCredentials = SourceCredentials(),
+        transport: SourceTransport = SourceTransport(),
         titleHint: String = "",
         xml: String? = null,
     ): LocalFeed {
@@ -332,7 +371,10 @@ class LocalPodcastLibrary private constructor(
         val effectiveCredentials = direct.credentials
         // 来源地址同样只保存去掉 userinfo/token 的干净 URL。
         val safeSourceUrl = PlatformFeedAdapter.normalize(sourceUrl).getOrThrow().url
-        val parsed = PlatformFeedAdapter.parseFeedXml(xml ?: fetchText(safeUrl, effectiveCredentials)).getOrThrow()
+        SourceTransportSecurity.assertSchemeAllowed(safeUrl, transport)
+        val parsed = PlatformFeedAdapter.parseFeedXml(
+            xml ?: fetchText(safeUrl, effectiveCredentials, transport),
+        ).getOrThrow()
         val id = localFeedId(safeUrl)
         val now = System.currentTimeMillis()
         val podcast = PodcastDto(
@@ -358,7 +400,7 @@ class LocalPodcastLibrary private constructor(
             )
         }
         // 凭据单独加密保存，LocalFeed / 落盘 JSON 里只有干净 URL。
-        credentialStore.save(id, effectiveCredentials)
+        credentialStore.save(id, effectiveCredentials, transport)
         return LocalFeed(
             id = id,
             sourceUrl = safeSourceUrl,
@@ -440,11 +482,27 @@ class LocalPodcastLibrary private constructor(
 
         /** 仅供 JVM 单测注入临时目录与假响应，复用与 get(context) 相同的单例逻辑。 */
         internal fun getOrCreate(storageDir: File, fetchText: (String) -> String): LocalPodcastLibrary =
-            getOrCreate(storageDir, { url, _ -> fetchText(url) })
+            getOrCreate(storageDir, { url, _, _ -> fetchText(url) })
 
         internal fun getOrCreate(
             storageDir: File,
             fetchText: (String, SourceCredentials) -> String,
+            credentialStore: SourceCredentialStore = SourceCredentialStore(InMemoryCredentialStorage()),
+        ): LocalPodcastLibrary {
+            instance?.let { return it }
+            return synchronized(this) {
+                instance ?: LocalPodcastLibrary(
+                    storageDir,
+                    { url, credentials, _ -> fetchText(url, credentials) },
+                    credentialStore,
+                ).also { instance = it }
+            }
+        }
+
+        /** 注入带传输参数的假 fetcher，供传输安全测试使用。 */
+        internal fun getOrCreate(
+            storageDir: File,
+            fetchText: (String, SourceCredentials, SourceTransport) -> String,
             credentialStore: SourceCredentialStore = SourceCredentialStore(InMemoryCredentialStorage()),
         ): LocalPodcastLibrary {
             instance?.let { return it }
@@ -457,46 +515,41 @@ class LocalPodcastLibrary private constructor(
             synchronized(this) { instance = null }
         }
 
-        private val httpClient: OkHttpClient = OkHttpClient.Builder()
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .cookieJar(CookieJar.NO_COOKIES)
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .writeTimeout(15, TimeUnit.SECONDS)
-            .callTimeout(45, TimeUnit.SECONDS)
-            .build()
-
         /**
          * 手动跟随跳转：每跳都重新校验 URL 协议，响应限制 4 MiB。
-         * 凭据按当前请求的类型生成请求头；跨 host / 非 https 跳转不转发凭据。
+         * OkHttp 客户端按来源凭据与传输材料创建；跨 host / https 降级跳转同时剥离
+         * 认证与客户端证书，requireHttps 下 http 及 http 降级跳转一律拒绝。
          */
         fun fetchHttpText(
             url: String,
             credentials: SourceCredentials = SourceCredentials(),
+            transport: SourceTransport = SourceTransport(),
         ): String {
             var current = url
             var hopCredentials = credentials
+            var hopTransport = transport
             for (hop in 0..MAX_REDIRECTS) {
                 val reference = PlatformFeedAdapter.normalize(current, hopCredentials)
                     .getOrElse { throw IOException(it.message ?: "链接无效") }
                 val safeUrl = reference.fetchUrl
                     ?: throw IOException("链接没有可抓取的公开 feed 地址")
+                SourceTransportSecurity.assertSchemeAllowed(safeUrl, hopTransport)
                 val requestCredentials = (reference as? FeedReference.DirectFeed)?.credentials
                     ?: SourceCredentials()
                 val request = Request.Builder().url(safeUrl).header("User-Agent", USER_AGENT).apply {
                     credentialHeaders(requestCredentials).forEach { (name, value) -> header(name, value) }
                 }.build()
                 var result: String? = null
-                httpClient.newCall(request).execute().use { response ->
+                buildClient(requestCredentials, hopTransport).newCall(request).execute().use { response ->
                     when {
                         response.code in 300..399 -> {
                             if (hop == MAX_REDIRECTS) throw IOException("跳转次数过多")
                             val location = response.header("Location")
                             if (location.isNullOrBlank()) throw IOException("跳转地址缺失")
-                            val nextUrl = resolveRedirect(safeUrl, location)
+                            val nextUrl = resolveRedirect(safeUrl, location, hopTransport)
                                 .getOrElse { throw IOException(it.message ?: "跳转地址无效") }
                             hopCredentials = credentialsForRedirect(safeUrl, nextUrl, requestCredentials)
+                            hopTransport = transportForRedirect(safeUrl, nextUrl, hopTransport)
                             current = nextUrl
                         }
                         !response.isSuccessful -> throw IOException("HTTP " + response.code)
@@ -506,6 +559,44 @@ class LocalPodcastLibrary private constructor(
                 if (result != null) return result as String
             }
             throw IOException("跳转次数过多")
+        }
+
+        /** 系统证书 + 自定义 CA、mTLS 密钥与 Digest Authenticator 都只作用于当前来源。 */
+        private fun buildClient(credentials: SourceCredentials, transport: SourceTransport): OkHttpClient {
+            val builder = OkHttpClient.Builder()
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .cookieJar(CookieJar.NO_COOKIES)
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
+                .writeTimeout(15, TimeUnit.SECONDS)
+                .callTimeout(45, TimeUnit.SECONDS)
+            val hasTlsMaterial = transport.customCaPem.isNotBlank() ||
+                transport.clientCertPem.isNotBlank() || transport.clientKeyPem.isNotBlank()
+            if (hasTlsMaterial) {
+                // 系统证书与自定义 CA 合并，不关闭校验；mTLS 私钥按来源解析。
+                val trustManager = SourceTransportSecurity.trustManager(transport.customCaPem)
+                val keyManagers: Array<KeyManager>? =
+                    if (transport.clientCertPem.isNotBlank() || transport.clientKeyPem.isNotBlank()) {
+                        arrayOf(
+                            SourceTransportSecurity.keyManager(
+                                transport.clientCertPem,
+                                transport.clientKeyPem,
+                                transport.clientKeyPassword,
+                            ),
+                        )
+                    } else {
+                        null
+                    }
+                val socketFactory = SSLContext.getInstance("TLS").apply {
+                    init(keyManagers, arrayOf(trustManager), null)
+                }.socketFactory
+                builder.sslSocketFactory(socketFactory, trustManager)
+            }
+            if (digestEnabled(credentials, transport)) {
+                builder.authenticator(DigestAuthenticator(credentials))
+            }
+            return builder.build()
         }
 
         private fun readBounded(input: InputStream): String {

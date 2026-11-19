@@ -39,4 +39,42 @@ class SourceCredentialStoreTest {
         store.save("feed-a", SourceCredentials(CredentialKind.BASIC, "alice", "new-pw"))
         assertEquals("new-pw", store.load("feed-a").secret)
     }
+
+    @Test fun savesAndLoadsEveryTransportFieldEncryptedByFeedId() {
+        val store = store()
+        val credentials = SourceCredentials(CredentialKind.DIGEST, "alice", "digest-secret")
+        val transport = SourceTransport(
+            requireHttps = true,
+            customCaPem = "ca-pem",
+            clientCertPem = "cert-pem",
+            clientKeyPem = "key-pem",
+            clientKeyPassword = "key-password",
+            digest = true,
+        )
+        store.save("feed-a", credentials, transport)
+        assertEquals(credentials, store.load("feed-a"))
+        assertEquals(transport, store.loadTransport("feed-a"))
+    }
+
+    @Test fun legacySaveAndMissingFeedLoadDefaultTransport() {
+        val store = store()
+        store.save("legacy", SourceCredentials(CredentialKind.BASIC, "alice", "pw"))
+        assertEquals(SourceCredentials(CredentialKind.BASIC, "alice", "pw"), store.load("legacy"))
+        assertEquals(SourceTransport(), store.loadTransport("legacy"))
+        assertEquals(SourceTransport(), store.loadTransport("missing"))
+    }
+
+    @Test fun removeClearsTransportMaterialToo() {
+        val store = store()
+        store.save("feed-a", SourceCredentials(), SourceTransport(true, "ca", "cert", "key", "pw", true))
+        store.remove("feed-a")
+        assertEquals(SourceTransport(), store.loadTransport("feed-a"))
+        assertEquals(SourceCredentials(), store.load("feed-a"))
+    }
+
+    @Test fun digestCredentialsSurviveStorageRoundTrip() {
+        val store = store()
+        store.save("d", SourceCredentials(CredentialKind.DIGEST, "user", "secret"))
+        assertEquals(CredentialKind.DIGEST, store.load("d").kind)
+    }
 }

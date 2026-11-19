@@ -13,6 +13,12 @@
 
 官方 API 通常需要开发者凭据、用户授权和平台审核；未取得这些条件前不会声称已接入。公开网页链接的解析只用于识别平台，不代表获得内容授权。
 
+## 传输加密与摘要认证
+
+每个来源还可设置：强制 HTTPS（拒绝 http 与降级跳转）、自定义 CA 证书（与系统证书合并校验，不关闭证书验证）、mTLS 客户端证书与私钥、HTTP Digest 挑战认证。Digest 只在服务端返回 401 挑战后计算 Authorization，不预发明文密码。证书私钥与摘要凭据同样只进本机的加密存储；跨主机、端口变化或 HTTPS 降级时剥离认证与客户端证书。
+
+Apple 的 iOS mTLS 分支支持未加密 PKCS#8 私钥；加密私钥需要服务端提供 PKCS#12，当前真机路径仍需在 iOS SDK/Xcode 环境验证。OAuth、设备码和音频内容本身加密尚未实现，不声称支持。
+
 ## 来源认证
 
 部分播客源要求账号密码或密钥。客户端支持每个来源单独配置：链接中的 `user:pass@` 会转换为 HTTP Basic，`?token=`/`?access_token=` 转换为 Bearer，`?api_key=`/`?key=` 转换为 API Key 请求头；也可以在导入页单独填写这三类凭据。凭据会从保存的 feed URL 中移除，按来源加密保存（Android EncryptedSharedPreferences，Apple Keychain），只随该来源请求发送，不经过任何中间服务。跨主机或 HTTPS 降级跳转会剥离认证头。

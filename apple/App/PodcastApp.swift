@@ -93,13 +93,19 @@ private struct LocalFeedStore {
 }
 
 
-// MARK: - Credential storage (Keychain on Apple platforms, memory fallback elsewhere)
+// MARK: - Credential and transport storage (Keychain on Apple platforms, memory fallback elsewhere)
+
+/// Everything sensitive for one feed. Never part of the JSON subscription file.
+private struct StoredFeedSecrets: Codable {
+    var credentials: SourceCredentials
+    var transport: SourceTransport
+}
 
 #if canImport(Security)
-private enum CredentialStore {
+private enum FeedSecretStore {
     private static let service = "com.podcastapp.feed-credentials"
 
-    static func load(for feedID: String) -> SourceCredentials {
+    static func load(for feedID: String) -> StoredFeedSecrets {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -109,19 +115,25 @@ private enum CredentialStore {
         ]
         var item: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data,
-              let credentials = try? JSONDecoder().decode(SourceCredentials.self, from: data)
-        else { return SourceCredentials() }
-        return credentials
+              let data = item as? Data else {
+            return StoredFeedSecrets(credentials: SourceCredentials(), transport: SourceTransport())
+        }
+        // New records carry transport; legacy records only carry credentials.
+        if let secrets = try? JSONDecoder().decode(StoredFeedSecrets.self, from: data) { return secrets }
+        if let credentials = try? JSONDecoder().decode(SourceCredentials.self, from: data) {
+            return StoredFeedSecrets(credentials: credentials, transport: SourceTransport())
+        }
+        return StoredFeedSecrets(credentials: SourceCredentials(), transport: SourceTransport())
     }
 
-    static func save(_ credentials: SourceCredentials, for feedID: String) {
+    static func save(_ secrets: StoredFeedSecrets, for feedID: String) {
         let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: feedID,
         ]
-        guard credentials.kind != .none, let data = try? JSONEncoder().encode(credentials) else {
+        let hasSecrets = secrets.credentials.kind != .none || secrets.transport != SourceTransport()
+        guard hasSecrets, let data = try? JSONEncoder().encode(secrets) else {
             SecItemDelete(base as CFDictionary)
             return
         }
@@ -146,21 +158,24 @@ private enum CredentialStore {
     }
 }
 #else
-private enum CredentialStore {
+private enum FeedSecretStore {
     private static let lock = NSLock()
-    private static var memory: [String: SourceCredentials] = [:]
+    private static var memory: [String: StoredFeedSecrets] = [:]
 
-    static func load(for feedID: String) -> SourceCredentials {
+    static func load(for feedID: String) -> StoredFeedSecrets {
         lock.lock()
         defer { lock.unlock() }
-        return memory[feedID] ?? SourceCredentials()
+        return memory[feedID] ?? StoredFeedSecrets(credentials: SourceCredentials(), transport: SourceTransport())
     }
 
-    static func save(_ credentials: SourceCredentials, for feedID: String) {
+    static func save(_ secrets: StoredFeedSecrets, for feedID: String) {
         lock.lock()
         defer { lock.unlock() }
-        if credentials.kind == .none { memory.removeValue(forKey: feedID) }
-        else { memory[feedID] = credentials }
+        if secrets.credentials.kind == .none, secrets.transport == SourceTransport() {
+            memory.removeValue(forKey: feedID)
+        } else {
+            memory[feedID] = secrets
+        }
     }
 
     static func remove(for feedID: String) {
@@ -183,6 +198,8 @@ private enum FeedAddError: LocalizedError {
     case malformedOPML
     case missingFeedURL
     case webNeedsRSS
+    case httpsRequired
+    case invalidTransport
 
     var errorDescription: String? {
         switch self {
@@ -195,6 +212,8 @@ private enum FeedAddError: LocalizedError {
         case .malformedOPML: return "OPML 订阅列表格式不正确。"
         case .missingFeedURL: return "Apple Podcasts 查询结果中没有公开的 RSS 地址。"
         case .webNeedsRSS: return "需要节目公开 RSS 地址。该平台的分享链接无法直接解析为订阅源。"
+        case .httpsRequired: return "该来源要求 HTTPS，已拒绝 HTTP 地址或降级跳转。"
+        case .invalidTransport: return "传输加密设置无效，请检查证书与私钥。"
         }
     }
 }
@@ -205,55 +224,186 @@ private func safeMessage(_ error: Error, fallback: String) -> String {
 
 // MARK: - Direct HTTP(S) fetching via URLSession
 
-/// Removes authentication headers on redirects that leave the original host or downgrade HTTPS.
-private final class RedirectCredentialGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+/// Per-session delegate: HTTPS policy, redirect sanitizing, custom CA, mTLS and Digest challenges.
+private final class FeedSessionDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
+    private let transport: SourceTransport
+    private let credentials: SourceCredentials
     private let protectedFields: Set<String>
+    private let originalURL: URL?
+    private let clientCredential: URLCredential?
+#if canImport(Security)
+    private let customAnchors: [SecCertificate]
+#endif
 
-    init(protectedFields: Set<String>) { self.protectedFields = protectedFields }
+    init(transport: SourceTransport, credentials: SourceCredentials, originalURL: URL?) {
+        self.transport = transport
+        self.credentials = credentials
+        self.originalURL = originalURL
+        self.protectedFields = Set(credentials.httpHeaders.keys)
+#if canImport(Security)
+        self.customAnchors = Self.certificates(from: transport.customCaPem)
+        self.clientCredential = Self.clientCredential(certPEM: transport.clientCertPem,
+                                                      keyPEM: transport.clientKeyPem,
+                                                      password: transport.clientKeyPassword)
+#else
+        self.clientCredential = nil
+#endif
+    }
 
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
-        let original = task.originalRequest?.url
-        let target = request.url
-        let sameHost = original?.host?.lowercased() == target?.host?.lowercased()
-        let downgraded = original?.scheme?.lowercased() == "https" && target?.scheme?.lowercased() != "https"
-        if sameHost, !downgraded {
-            completionHandler(request)
+        guard let target = request.url,
+              transport.allowsRedirect(from: task.originalRequest?.url, to: target) else {
+            completionHandler(nil)
             return
         }
         var sanitized = request
-        for field in protectedFields { sanitized.setValue(nil, forHTTPHeaderField: field) }
+        if SourceTransport.shouldStripCredentials(from: task.originalRequest?.url, to: target) {
+            for field in protectedFields { sanitized.setValue(nil, forHTTPHeaderField: field) }
+            sanitized.setValue(nil, forHTTPHeaderField: "Authorization")
+        }
         completionHandler(sanitized)
     }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let host = challenge.protectionSpace.host.lowercased()
+        let originalHost = originalURL?.host?.lowercased()
+        let crossHost = originalHost != nil && originalHost != host
+        switch challenge.protectionSpace.authenticationMethod {
+        case NSURLAuthenticationMethodServerTrust:
+#if canImport(Security)
+            if !customAnchors.isEmpty, !crossHost, let trust = challenge.protectionSpace.serverTrust {
+                // Custom anchors are added to, not substituted for, the system trust store.
+                // anchorCertificatesOnly=false keeps full system validation in force.
+                SecTrustSetAnchorCertificates(trust, customAnchors as CFArray)
+                SecTrustSetAnchorCertificatesOnly(trust, false)
+                var error: CFError?
+                if SecTrustEvaluateWithError(trust, &error) {
+                    completionHandler(.useCredential, URLCredential(trust: trust))
+                } else {
+                    completionHandler(.cancelAuthenticationChallenge, nil)
+                }
+                return
+            }
+#endif
+            completionHandler(.performDefaultHandling, nil)
+        case NSURLAuthenticationMethodClientCertificate:
+            if !crossHost, let clientCredential {
+                completionHandler(.useCredential, clientCredential)
+            } else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+            }
+        case NSURLAuthenticationMethodHTTPDigest:
+            let usesDigest = credentials.kind == .digest || transport.digest
+            if !crossHost, usesDigest, !credentials.username.isEmpty, !credentials.secret.isEmpty {
+                // No static header: URLSession derives the Digest response from this
+                // credential only after the server answers 401 with a challenge.
+                completionHandler(.useCredential,
+                                  URLCredential(user: credentials.username,
+                                                password: credentials.secret,
+                                                persistence: .forSession))
+            } else {
+                completionHandler(.performDefaultHandling, nil)
+            }
+        default:
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+
+#if canImport(Security)
+    private static func certificates(from pem: String) -> [SecCertificate] {
+        let begin = "-----BEGIN CERTIFICATE-----"
+        let end = "-----END CERTIFICATE-----"
+        var rest = pem
+        var result: [SecCertificate] = []
+        while let start = rest.range(of: begin),
+              let finish = rest.range(of: end, range: start.upperBound..<rest.endIndex) {
+            let body = rest[start.upperBound..<finish.lowerBound]
+            let base64 = body.split(whereSeparator: \.isNewline).map(String.init)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !$0.contains(":") }.joined()
+            if let data = Data(base64Encoded: base64),
+               let certificate = SecCertificateCreateWithData(nil, data as CFData) {
+                result.append(certificate)
+            }
+            rest = String(rest[finish.upperBound...])
+        }
+        return result
+    }
+
+    private static func clientCredential(certPEM: String, keyPEM: String, password: String) -> URLCredential? {
+        guard !certPEM.isEmpty, !keyPEM.isEmpty,
+              let certificate = certificates(from: certPEM).first else { return nil }
+        var privateKey: SecKey?
+#if os(macOS)
+        var parameters = SecItemImportExportKeyParameters(version: UInt32(0), flags: [],
+            passphrase: password.isEmpty ? nil : Unmanaged.passUnretained(password as CFString),
+            alertTitle: nil, alertPrompt: nil, accessRef: nil, keyUsage: nil, keyAttributes: nil)
+        var imported: CFArray?
+        let status = SecItemImport(Data(keyPEM.utf8) as CFData, nil, nil, nil, [], &parameters, nil, &imported)
+        if status == errSecSuccess, let keys = imported as? [SecKey] {
+            privateKey = keys.first
+        }
+#else
+        // iOS has no SecItemImport: accept an unencrypted PKCS#8 PEM key. Encrypted PEM
+        // keys require a server-provisioned PKCS#12 bundle via SecPKCS12Import.
+        if password.isEmpty,
+           let start = keyPEM.range(of: "-----BEGIN PRIVATE KEY-----"),
+           let finish = keyPEM.range(of: "-----END PRIVATE KEY-----", range: start.upperBound..<keyPEM.endIndex) {
+            let body = keyPEM[start.upperBound..<finish.lowerBound]
+            let base64 = body.split(whereSeparator: \.isNewline).map(String.init)
+                .map { $0.trimmingCharacters(in: .whitespaces) }.joined()
+            if let der = Data(base64Encoded: base64) {
+                for type in [kSecAttrKeyTypeRSA, kSecAttrKeyTypeECSECPrimeRandom] {
+                    let attributes: [CFString: Any] = [
+                        kSecAttrKeyType: type,
+                        kSecAttrKeyClass: kSecAttrKeyClassPrivate,
+                    ]
+                    if let key = SecKeyCreateWithData(der as CFData, attributes as CFDictionary, nil) {
+                        privateKey = key
+                        break
+                    }
+                }
+            }
+        }
+#endif
+        guard let privateKey, let identity = SecIdentityCreate(nil, certificate, privateKey) else { return nil }
+        return URLCredential(identity: identity, certificates: nil, persistence: .forSession)
+    }
+#endif
 }
 
 private enum FeedHTTP {
     static let maximumFeedBytes = 4 * 1024 * 1024
     static let maximumLookupBytes = 512 * 1024
 
-    private static func makeSession(protectedFields: Set<String>) -> URLSession {
+    private static func makeSession(transport: SourceTransport, credentials: SourceCredentials,
+                                    originalURL: URL) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.urlCredentialStorage = nil
-        // The delegate only filters redirects; the system's default TLS validation stays in force.
         return URLSession(configuration: configuration,
-                          delegate: RedirectCredentialGuard(protectedFields: protectedFields),
+                          delegate: FeedSessionDelegate(transport: transport, credentials: credentials,
+                                                        originalURL: originalURL),
                           delegateQueue: nil)
     }
 
-    static func data(from url: URL, credentials: SourceCredentials, limit: Int) async throws -> Data {
-        let headers = credentials.httpHeaders
-        let session = makeSession(protectedFields: Set(headers.keys))
+    static func data(from url: URL, credentials: SourceCredentials, transport: SourceTransport,
+                     limit: Int) async throws -> Data {
+        guard transport.allows(url) else { throw FeedAddError.httpsRequired }
+        let session = makeSession(transport: transport, credentials: credentials, originalURL: url)
         defer { session.finishTasksAndInvalidate() }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         request.httpShouldHandleCookies = false
         request.setValue("application/rss+xml, application/xml, text/xml, application/json;q=0.9, */*;q=0.5",
                          forHTTPHeaderField: "Accept")
-        for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
+        // Basic/Bearer/API Key only; Digest has no static header and is answered on challenge.
+        for (field, value) in credentials.httpHeaders { request.setValue(value, forHTTPHeaderField: field) }
         let data: Data
         let response: URLResponse
         do {
@@ -310,7 +460,7 @@ private final class LibrarySession: ObservableObject {
         guard let index = feeds.firstIndex(where: { $0.id == feedID }) else { return }
         feeds.remove(at: index)
         if selection == feedID { selection = feeds.first?.id }
-        CredentialStore.remove(for: feedID)
+        FeedSecretStore.remove(for: feedID)
         persist()
     }
 
@@ -321,8 +471,12 @@ private final class LibrarySession: ObservableObject {
     }
 
     @discardableResult
-    func addSource(_ input: String, credentials: SourceCredentials) async -> Bool {
+    func addSource(_ input: String, credentials: SourceCredentials, transport: SourceTransport) async -> Bool {
         guard !isFetching else { return false }
+        do { try transport.validate() } catch {
+            addError = FeedAddError.invalidTransport.errorDescription
+            return false
+        }
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else {
             addError = FeedAddError.emptyInput.errorDescription
@@ -335,6 +489,14 @@ private final class LibrarySession: ObservableObject {
             addError = safeMessage(error, fallback: FeedAddError.invalidReference.errorDescription ?? "")
             return false
         }
+        if case .directFeed(let feedURL, _) = reference, !transport.allows(feedURL) {
+            addError = FeedAddError.httpsRequired.errorDescription
+            return false
+        }
+        if case .webMetadata(let webURL, _) = reference, !transport.allows(webURL) {
+            addError = FeedAddError.httpsRequired.errorDescription
+            return false
+        }
         switch reference {
         case .webMetadata:
             // No web page is fetched: these platforms need a public RSS URL.
@@ -344,6 +506,7 @@ private final class LibrarySession: ObservableObject {
             return await perform {
                 // The lookup host is unrelated to the feed host; never forward source credentials to it.
                 let data = try await FeedHTTP.data(from: lookup, credentials: SourceCredentials(),
+                                                   transport: SourceTransport(requireHttps: transport.requireHttps),
                                                    limit: FeedHTTP.maximumLookupBytes)
                 let result: LookupResponse
                 do { result = try JSONDecoder().decode(LookupResponse.self, from: data) }
@@ -359,12 +522,17 @@ private final class LibrarySession: ObservableObject {
                 guard case .directFeed(let resolvedURL, let resolvedCredentials) = resolved else {
                     throw FeedAddError.missingFeedURL
                 }
-                try await ingest(resolvedURL, credentials: resolvedCredentials,
+                guard transport.allows(resolvedURL) else { throw FeedAddError.httpsRequired }
+                // Lookup host is unrelated: never forward credentials or mTLS identity.
+                let resolvedTransport = SourceTransport(requireHttps: transport.requireHttps,
+                                                        customCaPem: transport.customCaPem)
+                try await ingest(resolvedURL, credentials: resolvedCredentials, transport: resolvedTransport,
                                  author: first?.artistName ?? "", titleHint: first?.collectionName)
             }
         case .directFeed(let feedURL, let feedCredentials):
             return await perform {
-                try await ingest(feedURL, credentials: feedCredentials, author: "", titleHint: nil)
+                try await ingest(feedURL, credentials: feedCredentials, transport: transport,
+                                 author: "", titleHint: nil)
             }
         }
     }
@@ -385,8 +553,10 @@ private final class LibrarySession: ObservableObject {
         }
     }
 
-    private func ingest(_ url: URL, credentials: SourceCredentials, author: String, titleHint: String?) async throws {
-        let data = try await FeedHTTP.data(from: url, credentials: credentials, limit: FeedHTTP.maximumFeedBytes)
+    private func ingest(_ url: URL, credentials: SourceCredentials, transport: SourceTransport,
+                        author: String, titleHint: String?) async throws {
+        let data = try await FeedHTTP.data(from: url, credentials: credentials, transport: transport,
+                                           limit: FeedHTTP.maximumFeedBytes)
         if Self.looksLikeOPML(data) {
             let outlines: [OpmlFeed]
             do { outlines = try PlatformFeedAdapter.parseOPML(data) }
@@ -395,26 +565,38 @@ private final class LibrarySession: ObservableObject {
             for outline in outlines {
                 try Task.checkCancellation()
                 // Each outline keeps only credentials derived from its own URL.
-                guard let reference = try? PlatformFeedAdapter.normalize(outline.url.absoluteString),
+                guard transport.allows(outline.url),
+                      let reference = try? PlatformFeedAdapter.normalize(outline.url.absoluteString),
                       case .directFeed(let feedURL, let feedCredentials) = reference else { continue }
+                // A different host never inherits mTLS identity or digest credentials.
+                let sameHost = outline.url.host?.lowercased() == url.host?.lowercased()
+                let outlineTransport = SourceTransport(
+                    requireHttps: transport.requireHttps,
+                    customCaPem: transport.customCaPem,
+                    clientCertPem: sameHost ? transport.clientCertPem : "",
+                    clientKeyPem: sameHost ? transport.clientKeyPem : "",
+                    clientKeyPassword: sameHost ? transport.clientKeyPassword : "",
+                    digest: sameHost && transport.digest)
                 let feedData = try await FeedHTTP.data(from: feedURL, credentials: feedCredentials,
+                                                       transport: outlineTransport,
                                                        limit: FeedHTTP.maximumFeedBytes)
                 let parsed: ParsedFeed
                 do { parsed = try PlatformFeedAdapter.parseFeed(feedData) }
                 catch { throw Self.adapterError(error) }
                 ingestSingle(feedURL, parsed: parsed, credentials: feedCredentials,
-                             author: "", titleHint: outline.title)
+                             transport: outlineTransport, author: "", titleHint: outline.title)
             }
         } else {
             let parsed: ParsedFeed
             do { parsed = try PlatformFeedAdapter.parseFeed(data) }
             catch { throw Self.adapterError(error) }
-            ingestSingle(url, parsed: parsed, credentials: credentials, author: author, titleHint: titleHint)
+            ingestSingle(url, parsed: parsed, credentials: credentials, transport: transport,
+                         author: author, titleHint: titleHint)
         }
     }
 
     private func ingestSingle(_ url: URL, parsed: ParsedFeed, credentials: SourceCredentials,
-                              author: String, titleHint: String?) {
+                              transport: SourceTransport, author: String, titleHint: String?) {
         let title: String
         if !parsed.title.isEmpty {
             title = parsed.title
@@ -432,7 +614,7 @@ private final class LibrarySession: ObservableObject {
             feeds.append(feed)
         }
         selection = feed.id
-        CredentialStore.save(credentials, for: feed.id)
+        FeedSecretStore.save(StoredFeedSecrets(credentials: credentials, transport: transport), for: feed.id)
         persist()
     }
 
@@ -503,13 +685,24 @@ private struct AddSourceView: View {
     // Transient text-field state only: cleared on submit, never copied into library state or JSON.
     @State private var secret = ""
     @State private var apiKeyHeader = ""
+    @State private var requireHttps = false
+    @State private var useDigest = false
+    @State private var caPEM = ""
+    @State private var clientCertPEM = ""
+    @State private var clientKeyPEM = ""
+    @State private var clientKeyPassword = ""
 
     private func submit() {
         let credentials = SourceCredentials(kind: authKind, username: username,
                                             secret: secret, header: apiKeyHeader)
+        let transport = SourceTransport(requireHttps: requireHttps, customCaPem: caPEM,
+                                        clientCertPem: clientCertPEM, clientKeyPem: clientKeyPEM,
+                                        clientKeyPassword: clientKeyPassword, digest: useDigest)
         secret = ""
+        clientKeyPEM = ""
+        clientKeyPassword = ""
         Task { @MainActor in
-            if await library.addSource(input, credentials: credentials) { dismiss() }
+            if await library.addSource(input, credentials: credentials, transport: transport) { dismiss() }
         }
     }
 
@@ -532,6 +725,7 @@ private struct AddSourceView: View {
                         Text("Basic").tag(CredentialKind.basic)
                         Text("Bearer").tag(CredentialKind.bearer)
                         Text("API Key").tag(CredentialKind.apiKey)
+                        Text("Digest").tag(CredentialKind.digest)
                     }
                     switch authKind {
                     case .none:
@@ -552,6 +746,17 @@ private struct AddSourceView: View {
                             SecureField("令牌", text: $secret)
                                 .textContentType(.password)
                         }
+                    case .digest:
+                        inputRow("用户名") {
+                            TextField("用户名", text: $username)
+                                .textContentType(.username)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
+                        inputRow("密码") {
+                            SecureField("密码", text: $secret)
+                                .textContentType(.password)
+                        }
                     case .apiKey:
                         inputRow("API Key 请求头名称") {
                             TextField("X-API-Key", text: $apiKeyHeader)
@@ -562,6 +767,27 @@ private struct AddSourceView: View {
                             SecureField("API Key", text: $secret)
                                 .textContentType(.password)
                         }
+                    }
+                }
+                .disabled(library.isFetching)
+                Section("传输加密（可选）") {
+                    Toggle("仅允许 HTTPS（禁止降级跳转）", isOn: $requireHttps)
+                    Toggle("HTTP Digest 认证（401 挑战后再计算）", isOn: $useDigest)
+                    inputRow("自定义 CA PEM") {
+                        TextEditor(text: $caPEM).frame(minHeight: 60)
+                            .font(.footnote.monospaced())
+                    }
+                    inputRow("客户端证书 PEM") {
+                        TextEditor(text: $clientCertPEM).frame(minHeight: 60)
+                            .font(.footnote.monospaced())
+                    }
+                    inputRow("客户端私钥 PEM（仅存钥匙串）") {
+                        SecureField("私钥", text: $clientKeyPEM)
+                            .textContentType(.password)
+                    }
+                    inputRow("私钥密码（仅存钥匙串）") {
+                        SecureField("密码", text: $clientKeyPassword)
+                            .textContentType(.password)
                     }
                 }
                 .disabled(library.isFetching)
@@ -594,7 +820,7 @@ private struct AddSourceView: View {
                 }
             }
         }
-        .onDisappear { secret = "" }
+        .onDisappear { secret = ""; clientKeyPEM = ""; clientKeyPassword = "" }
     }
 
     private func inputRow<Field: View>(_ title: LocalizedStringKey, @ViewBuilder field: () -> Field) -> some View {

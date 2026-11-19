@@ -5,7 +5,7 @@ import FoundationNetworking
 
 /// How a single feed source authenticates. Never stored inside a feed URL.
 public enum CredentialKind: String, Codable, Hashable, Sendable {
-    case none, basic, bearer, apiKey
+    case none, basic, bearer, apiKey, digest
 }
 
 /// Credentials for one feed source. The secret is never written into a stored URL.
@@ -39,6 +39,9 @@ public struct SourceCredentials: Equatable, Codable, Sendable {
         case .apiKey:
             let value = Self.safeHeaderValue(secret)
             return value.isEmpty ? [:] : [Self.safeHeaderName(header): value]
+        case .digest:
+            // HTTP Digest is challenge-only: never pre-send a static Authorization header.
+            return [:]
         }
     }
 
@@ -57,6 +60,312 @@ public struct SourceCredentials: Equatable, Codable, Sendable {
             guard let value = scalar.unicodeScalars.first?.value else { return false }
             return value >= 0x20 && value != 0x7f
         })
+    }
+}
+
+/// Per-source transport policy. Secrets live only in the platform Keychain, never in subscription JSON.
+public struct SourceTransport: Equatable, Codable, Sendable {
+    public let requireHttps: Bool
+    public let customCaPem: String
+    public let clientCertPem: String
+    public let clientKeyPem: String
+    public let clientKeyPassword: String
+    public let digest: Bool
+
+    public init(requireHttps: Bool = false, customCaPem: String = "", clientCertPem: String = "",
+                clientKeyPem: String = "", clientKeyPassword: String = "", digest: Bool = false) {
+        self.requireHttps = requireHttps
+        self.customCaPem = customCaPem
+        self.clientCertPem = clientCertPem
+        self.clientKeyPem = clientKeyPem
+        self.clientKeyPassword = clientKeyPassword
+        self.digest = digest
+    }
+
+    public enum ValidationError: LocalizedError, Equatable, Sendable {
+        case invalidCertificatePEM
+        case incompleteClientCertificate
+        case invalidPrivateKeyPEM
+        case passwordRequired
+
+        public var errorDescription: String? {
+            switch self {
+            case .invalidCertificatePEM: return "证书 PEM 格式无效。"
+            case .incompleteClientCertificate: return "客户端证书与私钥必须同时填写。"
+            case .invalidPrivateKeyPEM: return "客户端私钥 PEM 格式无效。"
+            case .passwordRequired: return "加密私钥需要填写密码。"
+            }
+        }
+    }
+
+    /// Validates PEM shapes and key/certificate pairing before anything is persisted.
+    public func validate() throws {
+        if !customCaPem.isEmpty, Self.pemBody(customCaPem, label: "CERTIFICATE") == nil {
+            throw ValidationError.invalidCertificatePEM
+        }
+        let hasCert = !clientCertPem.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasKey = !clientKeyPem.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard hasCert == hasKey else { throw ValidationError.incompleteClientCertificate }
+        if hasCert {
+            guard Self.pemBody(clientCertPem, label: "CERTIFICATE") != nil else {
+                throw ValidationError.invalidCertificatePEM
+            }
+            guard let label = Self.privateKeyLabel(clientKeyPem),
+                  Self.pemBody(clientKeyPem, label: label) != nil else {
+                throw ValidationError.invalidPrivateKeyPEM
+            }
+            if label == "ENCRYPTED PRIVATE KEY", clientKeyPassword.isEmpty {
+                throw ValidationError.passwordRequired
+            }
+        }
+    }
+
+    /// A source that requires HTTPS must never open an http:// URL.
+    public func allows(_ url: URL) -> Bool {
+        !requireHttps || url.scheme?.lowercased() == "https"
+    }
+
+    /// Redirects must not downgrade HTTPS when the source requires it.
+    public func allowsRedirect(from original: URL?, to target: URL) -> Bool {
+        guard allows(target) else { return false }
+        guard let original, original.scheme?.lowercased() == "https" else { return true }
+        return target.scheme?.lowercased() == "https"
+    }
+
+    /// Authentication headers and client certificates must be dropped across hosts, ports or downgrades.
+    public static func shouldStripCredentials(from original: URL?, to target: URL) -> Bool {
+        guard let original else { return true }
+        let sameHost = original.host?.lowercased() == target.host?.lowercased()
+        let samePort = original.port == target.port
+        let downgraded = original.scheme?.lowercased() == "https" && target.scheme?.lowercased() != "https"
+        return !sameHost || !samePort || downgraded
+    }
+
+    private static let privateKeyLabels = ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "ENCRYPTED PRIVATE KEY"]
+
+    private static func privateKeyLabel(_ pem: String) -> String? {
+        privateKeyLabels.first { pemBody(pem, label: $0) != nil }
+    }
+
+    /// Extracts a base64 PEM body, tolerating legacy header lines (e.g. Proc-Type).
+    private static func pemBody(_ pem: String, label: String) -> String? {
+        let begin = "-----BEGIN \(label)-----"
+        let end = "-----END \(label)-----"
+        guard let start = pem.range(of: begin),
+              let finish = pem.range(of: end, range: start.upperBound..<pem.endIndex) else { return nil }
+        let lines = pem[start.upperBound..<finish.lowerBound].split(whereSeparator: \.isNewline)
+        let base64 = lines.map(String.init)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.contains(":") }
+            .joined()
+        guard !base64.isEmpty, let data = Data(base64Encoded: base64), !data.isEmpty else { return nil }
+        return base64
+    }
+}
+
+/// A parsed WWW-Authenticate Digest challenge.
+public struct DigestChallenge: Equatable, Sendable {
+    public let realm: String
+    public let nonce: String
+    public let qop: String?
+    public let opaque: String?
+    public let algorithm: String?
+    public let stale: String?
+
+    public init(realm: String, nonce: String, qop: String? = nil, opaque: String? = nil,
+                algorithm: String? = nil, stale: String? = nil) {
+        self.realm = realm
+        self.nonce = nonce
+        self.qop = qop
+        self.opaque = opaque
+        self.algorithm = algorithm
+        self.stale = stale
+    }
+}
+
+/// Pure RFC 7616 Digest computation, used after a 401 challenge — never for a pre-emptive header.
+public enum DigestAuthorization {
+    /// Parses the Digest parameters out of a (possibly multi-scheme) WWW-Authenticate value.
+    public static func parse(_ header: String) -> DigestChallenge? {
+        let fields = splitFields(header)
+        var params: [String] = []
+        var found = false
+        for field in fields {
+            let trimmed = field.trimmingCharacters(in: .whitespaces)
+            if found {
+                params.append(trimmed)
+                continue
+            }
+            if trimmed.caseInsensitiveCompare("Digest") == .orderedSame {
+                found = true
+            } else if trimmed.lowercased().hasPrefix("digest ") {
+                found = true
+                params.append(String(trimmed.dropFirst("digest ".count)))
+            }
+        }
+        guard found else { return nil }
+        var realm: String?
+        var nonce: String?
+        var qop: String?
+        var opaque: String?
+        var algorithm: String?
+        var stale: String?
+        for param in params {
+            guard let equals = param.firstIndex(of: "=") else { break }
+            let key = String(param[..<equals]).trimmingCharacters(in: .whitespaces).lowercased()
+            var value = String(param[param.index(after: equals)...]).trimmingCharacters(in: .whitespaces)
+            if value.count >= 2, value.hasPrefix("\""), value.hasSuffix("\"") {
+                value = String(value.dropFirst().dropLast())
+            }
+            switch key {
+            case "realm": realm = value
+            case "nonce": nonce = value
+            case "qop": qop = value.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+                .first(where: { $0 == "auth" }) ?? value.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }.first
+            case "opaque": opaque = value
+            case "algorithm": algorithm = value
+            case "stale": stale = value
+            default: break
+            }
+        }
+        guard let realm, let nonce, !realm.isEmpty, !nonce.isEmpty else { return nil }
+        return DigestChallenge(realm: realm, nonce: nonce, qop: qop, opaque: opaque,
+                               algorithm: algorithm, stale: stale)
+    }
+
+    /// Builds the challenge response. cnonce is injectable for deterministic tests.
+    public static func authorizationHeader(challenge: DigestChallenge, username: String, password: String,
+                                           method: String, uri: String, cnonce: String? = nil) -> String? {
+        guard !username.isEmpty, !challenge.realm.isEmpty, !challenge.nonce.isEmpty else { return nil }
+        let nonceCount = "00000001"
+        let clientNonce = cnonce ?? randomNonce()
+        let ha1 = MD5Hash.hex("\(username):\(challenge.realm):\(password)")
+        let ha2 = MD5Hash.hex("\(method):\(uri)")
+        let response: String
+        if let qop = challenge.qop?.lowercased(), qop == "auth" || qop == "auth-int" {
+            response = MD5Hash.hex("\(ha1):\(challenge.nonce):\(nonceCount):\(clientNonce):\(qop):\(ha2)")
+        } else {
+            response = MD5Hash.hex("\(ha1):\(challenge.nonce):\(ha2)")
+        }
+        var parts = [
+            "username=\"\(escape(username))\"",
+            "realm=\"\(escape(challenge.realm))\"",
+            "nonce=\"\(escape(challenge.nonce))\"",
+            "uri=\"\(escape(uri))\"",
+            "response=\"\(response)\"",
+        ]
+        if let algorithm = challenge.algorithm, !algorithm.isEmpty { parts.append("algorithm=\(algorithm)") }
+        if let opaque = challenge.opaque, !opaque.isEmpty { parts.append("opaque=\"\(escape(opaque))\"") }
+        if let qop = challenge.qop, !qop.isEmpty {
+            parts.append("qop=\(qop)")
+            parts.append("nc=\(nonceCount)")
+            parts.append("cnonce=\"\(escape(clientNonce))\"")
+        }
+        return "Digest " + parts.joined(separator: ", ")
+    }
+
+    private static func escape(_ raw: String) -> String {
+        raw.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private static func randomNonce() -> String {
+        func hex(_ value: UInt64) -> String {
+            String(value, radix: 16).padding(toLength: 16, withPad: "0", startingAt: 0)
+        }
+        var generator = SystemRandomNumberGenerator()
+        return hex(UInt64.random(in: UInt64.min...UInt64.max, using: &generator))
+            + hex(UInt64.random(in: UInt64.min...UInt64.max, using: &generator))
+    }
+
+    private static func splitFields(_ raw: String) -> [String] {
+        var fields: [String] = []
+        var current = ""
+        var quoted = false
+        var escaped = false
+        for character in raw {
+            if escaped { current.append(character); escaped = false; continue }
+            if character == "\\", quoted { current.append(character); escaped = true; continue }
+            if character == "\"" { quoted.toggle(); current.append(character); continue }
+            if character == ",", !quoted { fields.append(current); current = ""; continue }
+            current.append(character)
+        }
+        if !current.isEmpty { fields.append(current) }
+        return fields
+    }
+}
+
+/// Minimal portable MD5 (CryptoKit is unavailable on Linux).
+private enum MD5Hash {
+    private static let shifts: [UInt32] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+        5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+        4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ]
+    private static let constants: [UInt32] = [
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+        0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+        0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+        0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+        0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+    ]
+
+    static func hex(_ message: String) -> String {
+        var bytes = Array(message.utf8)
+        let bitLength = UInt64(bytes.count) * 8
+        bytes.append(0x80)
+        while bytes.count % 64 != 56 { bytes.append(0) }
+        for shift in stride(from: 0, to: 64, by: 8) {
+            bytes.append(UInt8((bitLength >> UInt64(shift)) & 0xff))
+        }
+        var a: UInt32 = 0x67452301
+        var b: UInt32 = 0xefcdab89
+        var c: UInt32 = 0x98badcfe
+        var d: UInt32 = 0x10325476
+        for chunk in stride(from: 0, to: bytes.count, by: 64) {
+            var words = [UInt32](repeating: 0, count: 16)
+            for index in 0..<16 {
+                let offset = chunk + index * 4
+                words[index] = UInt32(bytes[offset])
+                    | (UInt32(bytes[offset + 1]) << 8)
+                    | (UInt32(bytes[offset + 2]) << 16)
+                    | (UInt32(bytes[offset + 3]) << 24)
+            }
+            var aa = a, bb = b, cc = c, dd = d
+            for index in 0..<64 {
+                let function: UInt32
+                let word: Int
+                switch index {
+                case 0..<16: function = (bb & cc) | (~bb & dd); word = index
+                case 16..<32: function = (dd & bb) | (~dd & cc); word = (5 * index + 1) % 16
+                case 32..<48: function = bb ^ cc ^ dd; word = (3 * index + 5) % 16
+                default: function = cc ^ (bb | ~dd); word = (7 * index) % 16
+                }
+                let sum = aa &+ function &+ constants[index] &+ words[word]
+                aa = dd
+                dd = cc
+                cc = bb
+                bb = bb &+ ((sum << shifts[index]) | (sum >> (32 - shifts[index])))
+            }
+            a = a &+ aa
+            b = b &+ bb
+            c = c &+ cc
+            d = d &+ dd
+        }
+        return [a, b, c, d].map { value in
+            var text = ""
+            for shift in stride(from: 0, to: 32, by: 8) {
+                let byte = Int((value >> UInt32(shift)) & 0xff)
+                text += String(byte >> 4, radix: 16) + String(byte & 0x0f, radix: 16)
+            }
+            return text
+        }.joined()
     }
 }
 
