@@ -597,13 +597,13 @@ private final class EpisodePlayback: ObservableObject {
         player.replaceCurrentItem(with: item)
         canPlay = true
         // Callbacks may already be queued when an episode changes.
-        playerStatus = player.observe(\.AVPlayer.timeControlStatus, options: [.new]) { [weak self] _, _ in
+        playerStatus = player.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.update(id: id) }
         }
-        itemStatus = item.observe(\.AVPlayerItem.status, options: [.new]) { [weak self] _, _ in
+        itemStatus = item.observe(\.status, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.update(id: id) }
         }
-        rangesStatus = item.observe(\.AVPlayerItem.seekableTimeRanges, options: [.new]) { [weak self] _, _ in
+        rangesStatus = item.observe(\.seekableTimeRanges, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.update(id: id) }
         }
         positionObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
