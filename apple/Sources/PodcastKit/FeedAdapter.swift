@@ -53,7 +53,10 @@ public struct SourceCredentials: Equatable, Codable, Sendable {
     }
 
     private static func safeHeaderValue(_ raw: String) -> String {
-        String(raw.filter { $0 != "\r" && $0 != "\n" })
+        String(raw.filter { scalar in
+            guard let value = scalar.unicodeScalars.first?.value else { return false }
+            return value >= 0x20 && value != 0x7f
+        })
     }
 }
 

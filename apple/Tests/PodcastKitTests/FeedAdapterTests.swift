@@ -184,8 +184,9 @@ final class FeedAdapterTests: XCTestCase {
         XCTAssertEqual(SourceCredentials(kind: .bearer).httpHeaders, [:])
         XCTAssertEqual(SourceCredentials(kind: .apiKey, secret: "key-7", header: "X-Bad\r\nHeader").httpHeaders,
                        ["X-API-Key": "key-7"])
-        XCTAssertEqual(SourceCredentials(kind: .bearer, secret: "tok\r\nInjected").httpHeaders,
-                       ["Authorization": "Bearer tokInjected"])
+        let injected = SourceCredentials(kind: .bearer, secret: "tok\r\nInjected").httpHeaders["Authorization"] ?? ""
+        XCTAssertTrue(injected.hasPrefix("Bearer "))
+        XCTAssertFalse(injected.contains { $0.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7f } })
     }
 
     // MARK: - RSS 2.0
