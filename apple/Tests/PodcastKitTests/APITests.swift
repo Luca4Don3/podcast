@@ -135,11 +135,12 @@ final class APITests: XCTestCase {
         }
     }
 
-    func testInstalledSessionDelegateRejectsEveryProposedRedirect() async throws {
+    func testInstalledSessionDelegateRejectsEveryProposedRedirect() throws {
         // Exercise the actual delegate directly: custom URLProtocol redirects are not portable.
         let origin = try XCTUnwrap(URL(string: "https://origin.example.invalid"))
-        let session = PodcastAPI(baseURL: origin).transport.session
-        defer { session.invalidateAndCancel() }
+        let api = PodcastAPI(baseURL: origin)
+        defer { withExtendedLifetime(api) {} }
+        let session = api.transport.session
         let delegate = try XCTUnwrap(session.delegate as? URLSessionTaskDelegate)
         let task = session.dataTask(with: origin) // never resumed; no network traffic
         for target in ["https://origin.example.invalid/other", "https://elsewhere.example.invalid", "http://origin.example.invalid"] {
@@ -159,7 +160,7 @@ final class APITests: XCTestCase {
             #else
             delegate.urlSession?(session, task: task, willPerformHTTPRedirection: response, newRequest: proposed, completionHandler: reject)
             #endif
-            await fulfillment(of: [decision], timeout: 1)
+            wait(for: [decision], timeout: 1)
         }
     }
 
