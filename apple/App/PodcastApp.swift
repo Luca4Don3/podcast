@@ -355,7 +355,8 @@ private final class FeedSessionDelegate: NSObject, URLSessionDelegate, URLSessio
         var items: CFArray?
         guard SecPKCS12Import(p12 as CFData, options as CFDictionary, &items) == errSecSuccess,
               let imported = items as? [[String: Any]],
-              let identity = imported.first?[kSecImportItemIdentity as String] as? SecIdentity else { return nil }
+              let identityValue = imported.first?[kSecImportItemIdentity as String] else { return nil }
+        let identity = identityValue as! SecIdentity
         return URLCredential(identity: identity, certificates: nil, persistence: .forSession)
 #endif
     }
