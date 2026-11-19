@@ -1,9 +1,14 @@
+#ifndef _SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
+#define _SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
+#endif
+
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
+#include <shellapi.h>
 #include <cstdio>
 #include <cwchar>
-#include <shellapi.h>
-#include <shlwapi.h>
+#include <cwctype>
 #include <string>
 #include <vector>
 
@@ -47,6 +52,10 @@ void set_status(const std::wstring &text) {
     if (g_status) SetWindowTextW(g_status, text.c_str());
 }
 
+std::wstring from_hstring(const winrt::hstring &value) {
+    return std::wstring(value.c_str(), value.size());
+}
+
 std::wstring format_time(const TimeSpan &value) {
     const int64_t seconds = value.count() / 10000000;
     wchar_t buffer[64];
@@ -69,7 +78,7 @@ void refresh_status() {
 
 void hook_session_events() {
     if (g_position_hooked || !g_session) return;
-    g_position_token = g_session.PlaybackPositionChanged([](const MediaPlaybackSession &, const IInspectable &) {
+    g_position_token = g_session.PositionChanged([](const MediaPlaybackSession &, const IInspectable &) {
         if (g_window) PostMessageW(g_window, kPositionMessage, 0, 0);
     });
     g_position_hooked = true;
@@ -88,9 +97,18 @@ bool valid_public_url(const std::wstring &text, Uri &uri) {
     }
 }
 
+void set_title(MediaPlaybackItem &item, const std::wstring &title) {
+    try {
+        auto props = item.GetDisplayProperties();
+        props.Title(title);
+        props.Type(MediaMediaType::Audio);
+        item.ApplyDisplayProperties(props);
+    } catch (...) { /* Metadata is optional for playback. */ }
+}
+
 void load_uri(const Uri &uri, const std::wstring &title) {
     auto item = MediaPlaybackItem(MediaSource::CreateFromUri(uri));
-    item.DisplayProperties().Title(title);
+    set_title(item, title);
     g_player.Source(item);
     hook_session_events();
     set_status(L"已加载：" + title);
@@ -122,10 +140,11 @@ void open_local_file(HWND hwnd) {
     try {
         StorageFile file = StorageFile::GetFileFromPathAsync(path).get();
         auto item = MediaPlaybackItem(MediaSource::CreateFromStorageFile(file));
-        item.DisplayProperties().Title(file.Name());
+        const std::wstring name = from_hstring(file.Name());
+        set_title(item, name);
         g_player.Source(item);
         hook_session_events();
-        set_status(L"已加载本地文件：" + file.Name());
+        set_status(L"已加载本地文件：" + name);
     } catch (...) {
         set_status(L"无法打开本地文件");
     }
@@ -193,7 +212,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         return 0;
     }
     case WM_DESTROY:
-        if (g_position_hooked && g_session) g_session.PlaybackPositionChanged(g_position_token);
+        if (g_position_hooked && g_session) g_session.PositionChanged(g_position_token);
         PostQuitMessage(0);
         return 0;
     default:
