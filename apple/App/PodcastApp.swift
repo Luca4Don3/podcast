@@ -293,6 +293,8 @@ private final class SMBStorageSession: ObservableObject {
         error = nil
     }
 
+    func setError(_ message: String) { error = message }
+
     static func join(_ base: String, _ child: String) -> String {
         let parts = (base.isEmpty ? [] : base.split(separator: "/").map(String.init))
             + (child.isEmpty ? [] : child.split(separator: "/").map(String.init))
@@ -321,7 +323,7 @@ private final class SMBStorageSession: ObservableObject {
             return
         } catch {
             entries = []
-            error = safeMessage(error, fallback: SMBSourceError.transport.localizedDescription)
+            self.error = safeMessage(error, fallback: SMBSourceError.transport.localizedDescription)
         }
     }
 
@@ -952,7 +954,7 @@ private final class LibrarySession: ObservableObject {
         } catch is CancellationError {
             return false
         } catch {
-            smb.error = safeMessage(error, fallback: SMBSourceError.invalidSource.localizedDescription)
+            smb.setError(safeMessage(error, fallback: SMBSourceError.invalidSource.localizedDescription))
             return false
         }
     }
@@ -2190,7 +2192,7 @@ private struct SMBBrowserView: View {
         .navigationTitle(source?.label ?? "SMB")
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            if library.smbSelectedSourceID != sourceID { library.select("smb:" + sourceID) }
+            if library.selection != "smb:" + sourceID { library.select("smb:" + sourceID) }
         }
     }
 }
@@ -2474,7 +2476,7 @@ private final class SMBResourceLoader: NSObject, AVAssetResourceLoaderDelegate, 
             try Task.checkCancellation()
             guard let source = SMBSourceStore().load().first(where: { $0.id == target.sourceID }),
                   let endpoint = source.endpoint,
-                  let relative = try? SMBPath(relative: SMBStorageSession.join(source.rootPath, target.path)) else {
+                  let relative = SMBPath(relative: SMBStorageSession.join(source.rootPath, target.path)) else {
                 throw SMBSourceError.invalidSource
             }
             let credentials = try SMBSecretStore.load(for: source.id)
