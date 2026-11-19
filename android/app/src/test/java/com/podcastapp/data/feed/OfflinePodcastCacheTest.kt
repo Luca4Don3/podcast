@@ -14,7 +14,12 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
+import okhttp3.ResponseBody
+import okhttp3.ResponseBody.Companion.asResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
+import okio.ForwardingSource
+import okio.buffer
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -50,6 +55,24 @@ class OfflinePodcastCacheTest {
         part.writeBytes(mp3)
         progress(mp3.size.toLong(), null)
         mp3.size.toLong()
+    }
+
+    private fun fixtureSignature(bytes: ByteArray, length: Int): Boolean =
+        bytes.copyOf(length).contentEquals(mp3.copyOf(16))
+
+    private fun httpDownloader(
+        code: Int,
+        body: ResponseBody,
+        contentRange: String? = null,
+        checkSignature: (ByteArray, Int) -> Boolean = ::fixtureSignature,
+    ): OfflineHttpDownloader {
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).message("fake")
+                .code(code).header("Content-Type", "audio/mpeg").body(body).apply {
+                    if (contentRange != null) header("Content-Range", contentRange)
+                }.build()
+        }.build()
+        return OfflineHttpDownloader(checkSignature) { request, _ -> client.newCall(request) }
     }
 
     @Test fun policiesPersistAndPrunePerFeed() = runBlocking {
@@ -136,16 +159,96 @@ class OfflinePodcastCacheTest {
         for (url in listOf("file:///tmp/a.mp3", "https://u:p@pod.example/a.mp3", "https://a.example/a.M3U8?x=y",
             "https://a.example/a.html")) assertNull(offlineName(episode.copy(audioUrl = url)))
         val good = temp.root.resolve("good.part")
-        assertEquals(mp3.size.toLong(), streamOfflineBody(mp3.inputStream(), -1, good) { _, _ -> })
+        assertEquals(mp3.size.toLong(),
+            streamOfflineBody(mp3.inputStream(), -1, good, hasMediaSignature = ::fixtureSignature) { _, _ -> })
         assertArrayEquals(mp3, good.readBytes())
         suspend fun rejected(bytes: ByteArray, length: Long, bound: Long): Throwable? = runCatching {
-            streamOfflineBody(bytes.inputStream(), length, temp.root.resolve("bad-$length-$bound.part"), bound) { _, _ -> }
+            streamOfflineBody(bytes.inputStream(), length, temp.root.resolve("bad-$length-$bound.part"), bound,
+                hasMediaSignature = ::fixtureSignature) { _, _ -> }
         }.exceptionOrNull()
         assertTrue(rejected("#EXTM3U\nsegment.ts".toByteArray(), -1, 4096) is UnsupportedOfflineMedia)
         assertTrue(rejected("<!DOCTYPE html>".toByteArray(), -1, 4096) is UnsupportedOfflineMedia)
         assertTrue(rejected(mp3, -1, 100) is IOException)
         assertTrue(rejected(mp3, mp3.size.toLong() + 1, 4096) is IOException)
         assertTrue(rejected(mp3, 4100, 4096) is IOException)
+    }
+
+    @Test fun http200ChecksOnlyThePrefixAndCommitsCompleteEpisode() = runBlocking {
+        val source = feed(count = 1)
+        var checks = 0
+        val downloader = httpDownloader(200, mp3.toResponseBody()) { bytes, length ->
+            checks++
+            assertEquals(16, length)
+            assertArrayEquals(mp3.copyOf(16), bytes)
+            true
+        }
+        val cache = OfflinePodcastCache(temp.root, disk, downloader)
+        assertEquals(OfflineProgress(completed = 1, total = 1), cache.update(source, OfflinePolicy.ALL))
+        assertEquals(1, checks)
+        val file = checkNotNull(cache.readyFile(source, source.episodes.single()))
+        assertArrayEquals(mp3, file.readBytes())
+        assertEquals(listOf(file.name), file.parentFile!!.list().orEmpty().toList())
+    }
+
+    @Test fun httpPartialResponsesAreRejectedBeforeSignatureCheck() = runBlocking {
+        val source = feed(count = 1)
+        val episode = source.episodes.single()
+        val part = temp.root.resolve("partial.part")
+        val range = "bytes 0-${mp3.lastIndex}/${mp3.size * 2}"
+        for ((code, contentRange) in listOf(206 to range, 206 to null, 200 to range)) {
+            val downloader = httpDownloader(code, mp3.toResponseBody(), contentRange) { _, _ ->
+                throw AssertionError("partial response reached signature check")
+            }
+            val error = runCatching {
+                downloader.download(source.feedUrl, episode.audioUrl, OfflineSourceAccess(), part) { _, _ -> }
+            }.exceptionOrNull()
+            assertTrue(error is IOException && error !is UnsupportedOfflineMedia)
+            assertFalse(part.exists())
+        }
+    }
+
+    @Test fun httpAudioMimeDoesNotBypassSignatureCheck() = runBlocking {
+        val source = feed(count = 1)
+        val html = "<!DOCTYPE html>".toByteArray()
+        val downloader = httpDownloader(200, html.toResponseBody()) { bytes, length ->
+            assertEquals(html.size, length)
+            assertArrayEquals(html, bytes.copyOf(length))
+            false
+        }
+        val cache = OfflinePodcastCache(temp.root, disk, downloader)
+        assertEquals(OfflineProgress(completed = 1, total = 1, skipped = 1), cache.update(source, OfflinePolicy.ALL))
+        assertNull(cache.readyFile(source, source.episodes.single()))
+        assertTrue(temp.root.resolve(sha256Hex(source.feedUrl)).list().orEmpty().isEmpty())
+    }
+
+    @Test fun httpDisconnectMidBodyPreservesOldCacheAndDeletesPart() = runBlocking {
+        val original = feed(count = 1)
+        val initial = OfflinePodcastCache(temp.root, disk, successful)
+        initial.update(original, OfflinePolicy.ALL)
+        val oldEpisode = original.episodes.single()
+        val oldFile = checkNotNull(initial.readyFile(original, oldEpisode))
+        val newEpisode = oldEpisode.copy(audioUrl = "https://cdn.example/replacement.mp3")
+        val updated = original.copy(episodes = listOf(newEpisode))
+        val half = mp3.size / 2
+        var disconnected = false
+        val body = object : ForwardingSource(Buffer().write(mp3, 0, half)) {
+            override fun read(sink: Buffer, byteCount: Long): Long {
+                val count = super.read(sink, byteCount)
+                if (count >= 0) return count
+                disconnected = true
+                throw IOException("simulated disconnect")
+            }
+        }.buffer().asResponseBody(contentLength = mp3.size.toLong())
+        val cache = OfflinePodcastCache(temp.root, disk, httpDownloader(200, body))
+        val part = oldFile.resolveSibling(offlineName(newEpisode) + ".part")
+        var sawPart = false
+        val progress = cache.update(updated) { if (it.bytes > 0) sawPart = part.isFile }
+        assertTrue(disconnected)
+        assertTrue(sawPart)
+        assertEquals(OfflineProgress(completed = 1, total = 1, failed = 1), progress)
+        assertNull(cache.readyFile(updated, newEpisode))
+        assertArrayEquals(mp3, oldFile.readBytes())
+        assertEquals(listOf(oldFile.name), oldFile.parentFile!!.list().orEmpty().toList())
     }
 
     @Test fun credentialsAndTransportDoNotCrossOriginsOrReturnAfterRedirect() = runBlocking {
@@ -162,7 +265,7 @@ class OfflinePodcastCacheTest {
                 else -> response.code(200).header("Content-Type", "audio/mpeg").body(mp3.toResponseBody()).build()
             }
         }.build()
-        val downloader = OfflineHttpDownloader { request, actual ->
+        val downloader = OfflineHttpDownloader(::fixtureSignature) { request, actual ->
             requests += request.header("Authorization") to actual
             client.newCall(request)
         }

@@ -64,16 +64,10 @@ public enum FeedCacheMedia {
 
     /// Out-of-band MIME alone cannot make a login page or disguised playlist an audio file.
     public static func hasAudioSignature(_ data: Data) -> Bool {
-        let bytes = Array(data.prefix(16))
-        func matches(_ text: String, at offset: Int = 0) -> Bool {
-            bytes.dropFirst(offset).starts(with: text.utf8)
+        data.withUnsafeBytes { bytes in
+            podcast_cache_has_media_signature(bytes.bindMemory(to: UInt8.self).baseAddress,
+                                              Int32(min(bytes.count, 16))) != 0
         }
-        return (bytes.count >= 4 && (matches("ID3") || matches("OggS") || matches("fLaC") || matches("caff") ||
-                matches("ftyp", at: 4) || (matches("RIFF") && matches("WAVE", at: 8)) ||
-                (matches("FORM") && (matches("AIFF", at: 8) || matches("AIFC", at: 8))) ||
-                bytes.starts(with: [0x1a, 0x45, 0xdf, 0xa3]) || // WebM / Matroska
-                bytes.starts(with: [0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11]) || // ASF/WMA
-                (bytes[0] == 0xff && (bytes[1] & 0xe0) == 0xe0))) // MPEG or ADTS frame sync
     }
 }
 

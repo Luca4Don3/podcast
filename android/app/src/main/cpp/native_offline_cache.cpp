@@ -44,6 +44,19 @@ Java_com_podcastapp_data_feed_NativeOfflineCache_nativeCommit(JNIEnv* env, jobje
     return file.get() ? podcast_cache_commit(directory.get(), temp.get(), file.get(), expected) : -1;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_podcastapp_data_feed_NativeOfflineCache_nativeHasMediaSignature(JNIEnv* env, jobject,
+                                                                       jbyteArray bytes, jint length) {
+    if (!bytes || length <= 0 || length > env->GetArrayLength(bytes)) return JNI_FALSE;
+    constexpr jsize maxPrefixLength = 16;
+    const jsize count = length < maxPrefixLength ? length : maxPrefixLength;
+    jbyte prefix[maxPrefixLength];
+    env->GetByteArrayRegion(bytes, 0, count, prefix);
+    if (env->ExceptionCheck()) return JNI_FALSE;
+    return podcast_cache_has_media_signature(reinterpret_cast<const uint8_t*>(prefix), count) != 0
+        ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_com_podcastapp_data_feed_NativeOfflineCache_nativePrune(JNIEnv* env, jobject,
                                                             jstring dir, jstring keep) {

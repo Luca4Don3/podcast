@@ -21,6 +21,9 @@ internal object NativeOfflineCache : OfflineCacheFiles {
     override fun prune(directory: File, keep: Collection<String>) =
         nativePrune(directory.path, keep.joinToString("\n"))
 
+    fun hasMediaSignature(bytes: ByteArray, length: Int) = nativeHasMediaSignature(bytes, length)
+
+    private external fun nativeHasMediaSignature(bytes: ByteArray, length: Int): Boolean
     private external fun nativeTargetCount(policy: Int, available: Int): Int
     private external fun nativeFileSize(directory: String, name: String): Long
     private external fun nativeCommit(directory: String, part: String, name: String, expectedSize: Long): Int

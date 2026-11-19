@@ -47,10 +47,27 @@ final class FeedAudioCacheTests: XCTestCase {
         XCTAssertNil(size(response(headers: ["Content-Type": "audio/x-mpegurl"])))
         XCTAssertNil(size(response(headers: ["Content-Type": "text/html"])))
         XCTAssertNil(size(response(headers: ["Content-Type": "audio/mpeg"], url: URL(string: "https://cdn.example.test/a.mp3"))))
+    }
+
+    func testAudioSignatureBoundaries() {
+        let asf = Data([0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11,
+                        0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62, 0xce, 0x6c])
+        let prefixed = Data(repeating: 0, count: 16) + asf + Data([0])
+        XCTAssertTrue(FeedCacheMedia.hasAudioSignature(asf))
+        XCTAssertTrue(FeedCacheMedia.hasAudioSignature(prefixed.dropFirst(16)))
         XCTAssertTrue(FeedCacheMedia.hasAudioSignature(Data("ID3\0audio".utf8)))
+        XCTAssertTrue(FeedCacheMedia.hasAudioSignature(Data("RF64\0\0\0\0WAVE".utf8)))
+        XCTAssertTrue(FeedCacheMedia.hasAudioSignature(Data([0xff, 0xfb, 0x90, 0x64])))
+
+        XCTAssertFalse(FeedCacheMedia.hasAudioSignature(Data()))
+        XCTAssertFalse(FeedCacheMedia.hasAudioSignature(Data("ID3".utf8)))
+        XCTAssertFalse(FeedCacheMedia.hasAudioSignature(asf.dropLast()))
+        XCTAssertFalse(FeedCacheMedia.hasAudioSignature(asf.dropLast() + Data([0])))
+        XCTAssertFalse(FeedCacheMedia.hasAudioSignature(prefixed))
+        XCTAssertFalse(FeedCacheMedia.hasAudioSignature(Data([0xff, 0xff, 0xff, 0xff])))
+        XCTAssertFalse(FeedCacheMedia.hasAudioSignature(Data("RIFF\0\0\0\0AVI ".utf8)))
         XCTAssertFalse(FeedCacheMedia.hasAudioSignature(Data("#EXTM3U\n#EXT-X-VERSION:3".utf8)))
         XCTAssertFalse(FeedCacheMedia.hasAudioSignature(Data("<!doctype html>".utf8)))
-        XCTAssertFalse(FeedCacheMedia.hasAudioSignature(Data()))
     }
 
 #if canImport(CryptoKit)
@@ -81,10 +98,11 @@ final class FeedAudioCacheTests: XCTestCase {
         XCTAssertNotEqual(cache.directory, other.directory)
         XCTAssertNotNil(cache.directory.lastPathComponent.range(of: "^[a-f0-9]{64}$", options: .regularExpression))
         XCTAssertNotNil(item.name.range(of: "^[a-f0-9]{64}\\.mp3$", options: .regularExpression))
-        XCTAssertNotEqual(item.name, FeedAudioCache.Item(episodeID: "episode/one", mediaURL: URL(string: "https://example.test/reissued.mp3")!)?.name)
+        let reissued = try XCTUnwrap(FeedAudioCache.Item(episodeID: "episode/one", mediaURL: URL(string: "https://example.test/reissued.mp3")!))
+        XCTAssertNotEqual(item.name, reissued.name)
         let part = cache.partialURL(for: item)
         XCTAssertEqual(part.lastPathComponent, item.name + ".part")
-        let payload = Data("fixture-audio".utf8)
+        let payload = Data("ID3\0fixture-audio".utf8)
         try payload.write(to: part)
         XCTAssertThrowsError(try cache.commit(item, expectedSize: 1))
         XCTAssertNil(cache.localURL(for: item))
@@ -93,13 +111,30 @@ final class FeedAudioCacheTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: XCTUnwrap(cache.localURL(for: item))), payload)
         XCTAssertNil(other.localURL(for: item))
         XCTAssertFalse(FileManager.default.fileExists(atPath: part.path))
-        try payload.write(to: other.partialURL(for: item))
+
+        let truncated = Data("ID3\0short".utf8)
+        try truncated.write(to: part)
+        XCTAssertThrowsError(try cache.commit(item, expectedSize: Int64(payload.count)))
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(cache.localURL(for: item))), payload)
+        XCTAssertEqual(try Data(contentsOf: part), truncated)
+
+        let otherPart = other.partialURL(for: item)
+        try payload.write(to: otherPart)
         try other.commit(item, expectedSize: -1)
+        try truncated.write(to: otherPart)
+        let unrelated = cache.directory.appendingPathComponent("unrelated.mp3.part")
+        try payload.write(to: unrelated)
+        let nonregular = cache.partialURL(for: reissued)
+        try FileManager.default.createDirectory(at: nonregular, withIntermediateDirectories: false)
         try cache.prune(keeping: [item])
-        XCTAssertNotNil(cache.localURL(for: item))
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(cache.localURL(for: item))), payload)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: part.path))
+        XCTAssertEqual(try Data(contentsOf: unrelated), payload)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: nonregular.path))
         try cache.prune(keeping: [])
         XCTAssertNil(cache.localURL(for: item))
-        XCTAssertNotNil(other.localURL(for: item))
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(other.localURL(for: item))), payload)
+        XCTAssertEqual(try Data(contentsOf: otherPart), truncated)
     }
 #endif
 }

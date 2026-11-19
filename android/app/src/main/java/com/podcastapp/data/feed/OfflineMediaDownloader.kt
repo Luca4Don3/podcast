@@ -40,6 +40,9 @@ internal fun interface OfflineMediaDownloader {
 internal val HttpOfflineMediaDownloader = OfflineHttpDownloader()
 
 internal class OfflineHttpDownloader(
+    private val hasMediaSignature: (ByteArray, Int) -> Boolean = { bytes, length ->
+        NativeOfflineCache.hasMediaSignature(bytes, length)
+    },
     private val createCall: (Request, OfflineSourceAccess) -> Call = { request, settings ->
         LocalPodcastLibrary.buildSourceClient(settings.credentials, settings.transport, timeoutSeconds = 240).newCall(request)
     },
@@ -102,7 +105,8 @@ internal class OfflineHttpDownloader(
         val body = response.body ?: throw IOException("单集响应为空")
         val type = response.header("Content-Type").orEmpty().substringBefore(';').trim().lowercase(Locale.ROOT)
         if (!supportedOfflineMime(type)) throw UnsupportedOfflineMedia()
-        return streamOfflineBody(body.byteStream(), body.contentLength(), destination, onProgress = onProgress)
+        return streamOfflineBody(body.byteStream(), body.contentLength(), destination,
+            hasMediaSignature = hasMediaSignature, onProgress = onProgress)
     }
 }
 
@@ -122,6 +126,7 @@ internal suspend fun streamOfflineBody(
     expected: Long,
     destination: File,
     maxBytes: Long = MAX_OFFLINE_EPISODE_BYTES,
+    hasMediaSignature: (ByteArray, Int) -> Boolean,
     onProgress: (Long, Long?) -> Unit,
 ): Long {
     if (expected == 0L || expected > maxBytes) throw IOException("单集大小不符合缓存限制")
@@ -161,18 +166,4 @@ internal suspend fun streamOfflineBody(
     if (expected >= 0L && expected != total) throw IOException("单集大小校验失败")
     onProgress(total, declared)
     return total
-}
-
-private fun hasMediaSignature(bytes: ByteArray, size: Int): Boolean {
-    fun match(offset: Int, text: String) = size >= offset + text.length &&
-        text.indices.all { bytes[offset + it].toInt() and 0xff == text[it].code }
-    fun unsigned(offset: Int) = bytes[offset].toInt() and 0xff
-    if (size < 4) return false
-    return match(0, "ID3") || match(0, "OggS") || match(0, "fLaC") || match(0, "caff") ||
-        match(4, "ftyp") || match(4, "moov") || match(4, "mdat") ||
-        ((match(0, "RIFF") || match(0, "RF64")) && match(8, "WAVE")) ||
-        (match(0, "FORM") && (match(8, "AIFF") || match(8, "AIFC"))) ||
-        (unsigned(0) == 0xff && (unsigned(1) and 0xe0) == 0xe0 && (unsigned(1) != 0xff)) ||
-        (unsigned(0) == 0x1a && unsigned(1) == 0x45 && unsigned(2) == 0xdf && unsigned(3) == 0xa3) ||
-        (unsigned(0) == 0x30 && unsigned(1) == 0x26 && unsigned(2) == 0xb2 && unsigned(3) == 0x75)
 }
