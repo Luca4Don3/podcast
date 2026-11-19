@@ -2478,7 +2478,8 @@ private final class SMBResourceLoader: NSObject, AVAssetResourceLoaderDelegate, 
                   let endpoint = source.endpoint else {
                 throw SMBSourceError.invalidSource
             }
-            let relative = try SMBPath(relative: SMBStorageSession.join(source.rootPath, target.path))
+            let joined = await SMBStorageSession.join(source.rootPath, target.path)
+            let relative = try SMBPath(relative: joined)
             let credentials = try SMBSecretStore.load(for: source.id)
             let client = try SMBClient(endpoint: endpoint, credentials: credentials, transport: source.transport)
             let handle = try await client.open(relative)

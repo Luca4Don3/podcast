@@ -8,6 +8,9 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
+# smbj pulls optional desktop-only APIs never reached on Android.
+-dontwarn javax.el.**
+-dontwarn org.ietf.jgss.**
 -keepclassmembers class kotlinx.serialization.json.** { *** Companion; }
 
 # JNI uses the class and method name directly.
