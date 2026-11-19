@@ -33,7 +33,7 @@ jobs:
         shell: pwsh
         run: |
           $x64 = Get-Item windows/build-x64/Release/podcast.exe
-          $arm = Get-Item windows/build-arm64/Release/ARM64/podcast.exe
+          $arm = Get-Item windows/build-arm64/Release/podcast.exe
           if (-not $x64 -or -not $arm) { throw 'missing executables' }
           Write-Output "x64 $($x64.Length) bytes"
           Write-Output "ARM64 $($arm.Length) bytes"

@@ -155,7 +155,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         g_window = hwnd;
         const DWORD style = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
         CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER,
-                        16, 16, 520, 24, hwnd, reinterpret_cast<HMENU>(kUrlEdit), g_instance, nullptr);
+                        16, 16, 520, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kUrlEdit)), g_instance, nullptr);
         struct Button { int id; const wchar_t *label; int x; int y; int width; };
         const Button buttons[] = {
             {kLoadUrl, L"加载 URL", 16, 52, 96},
@@ -169,9 +169,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         };
         for (const auto &b : buttons)
             CreateWindowExW(0, L"BUTTON", b.label, style | BS_PUSHBUTTON,
-                            b.x, b.y, b.width, 28, hwnd, reinterpret_cast<HMENU>(b.id), g_instance, nullptr);
+                            b.x, b.y, b.width, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(b.id)), g_instance, nullptr);
         g_status = CreateWindowExW(0, L"STATIC", L"就绪", WS_CHILD | WS_VISIBLE,
-                                   16, 132, 600, 24, hwnd, reinterpret_cast<HMENU>(kStatus), g_instance, nullptr);
+                                   16, 132, 600, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kStatus)), g_instance, nullptr);
         return 0;
     }
     case kPositionMessage:
@@ -216,6 +216,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     default:
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
+    return 0;
 }
 
 int run(int argc, wchar_t **argv) {
