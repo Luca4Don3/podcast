@@ -6,20 +6,21 @@ final class FeedAdapterTests: XCTestCase {
 
     // MARK: - normalize
 
-    func testNormalizeDirectFeedCanonicalizesAndKeepsQuery() throws {
+    func testNormalizeDirectFeedCanonicalizesAndKeepsOrdinaryQuery() throws {
         let cases: [(String, String)] = [
             ("https://feeds.example.invalid/rss.xml", "https://feeds.example.invalid/rss.xml"),
             ("  HTTP://Feeds.Example.Invalid/rss  ", "http://feeds.example.invalid/rss"),
-            ("https://feeds.example.invalid/rss?token=abc#top", "https://feeds.example.invalid/rss?token=abc"),
+            ("https://feeds.example.invalid/rss?page=2#top", "https://feeds.example.invalid/rss?page=2"),
             ("http://feeds.example.invalid:8080/feed", "http://feeds.example.invalid:8080/feed"),
         ]
         for (input, expected) in cases {
             let reference = try PlatformFeedAdapter.normalize(input)
-            guard case .directFeed(let url) = reference else {
+            guard case .directFeed(let url, let credentials) = reference else {
                 XCTFail("Expected a direct feed for \(input)")
                 continue
             }
             XCTAssertEqual(url.absoluteString, expected)
+            XCTAssertEqual(credentials, SourceCredentials())
             XCTAssertNil(url.fragment)
         }
     }
@@ -66,8 +67,6 @@ final class FeedAdapterTests: XCTestCase {
             "", "   ", "not a url", "podcasts.example.invalid/feed.xml",
             "ftp://feeds.example.invalid/rss", "file:///etc/passwd",
             "https:///rss", "https://feeds.example.invalid:65536/rss",
-            "https://sample@feeds.example.invalid/rss",
-            "https://sample:secret@feeds.example.invalid/rss",
             "https://feeds.example.invalid/a b.xml",
             "https://feeds.example.invalid/a\nb.xml",
             "https://feeds.example.invalid/a\(Character(UnicodeScalar(0)))xml",
@@ -86,7 +85,7 @@ final class FeedAdapterTests: XCTestCase {
     func testErrorTextNeverEchoesSensitiveInput() {
         let marker = "secret-fixture-marker-42"
         do {
-            _ = try PlatformFeedAdapter.normalize("https://user:\(marker)@feeds.example.invalid/rss")
+            _ = try PlatformFeedAdapter.normalize("https://user:\(marker)@feeds.example.invalid:65536/rss")
             XCTFail("Expected rejection")
         } catch {
             let description = (error as? LocalizedError)?.errorDescription ?? ""
@@ -98,6 +97,95 @@ final class FeedAdapterTests: XCTestCase {
             XCTAssertFalse((error.errorDescription ?? "").isEmpty)
             XCTAssertFalse((error.errorDescription ?? "").contains(marker))
         }
+    }
+
+    // MARK: - Source credentials
+
+    func testNormalizeExtractsUserInfoIntoBasicCredentialsAndStripsURL() throws {
+        let reference = try PlatformFeedAdapter.normalize("https://alice:s3cr3t@feeds.example.invalid/rss?page=2")
+        guard case .directFeed(let url, let credentials) = reference else {
+            return XCTFail("Expected a direct feed")
+        }
+        XCTAssertEqual(url.absoluteString, "https://feeds.example.invalid/rss?page=2")
+        XCTAssertEqual(credentials, SourceCredentials(kind: .basic, username: "alice", secret: "s3cr3t"))
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        XCTAssertNil(components?.user)
+        XCTAssertNil(components?.password)
+        XCTAssertFalse(url.absoluteString.contains("alice"))
+        XCTAssertFalse(url.absoluteString.contains("s3cr3t"))
+    }
+
+    func testNormalizeExtractsTokenAndAPIKeyQueriesAndStripsThem() throws {
+        let tokenRef = try PlatformFeedAdapter.normalize("https://feeds.example.invalid/rss?token=tok-42&page=2")
+        guard case .directFeed(let tokenURL, let tokenCredentials) = tokenRef else {
+            return XCTFail("Expected a direct feed")
+        }
+        XCTAssertEqual(tokenURL.absoluteString, "https://feeds.example.invalid/rss?page=2")
+        XCTAssertEqual(tokenCredentials, SourceCredentials(kind: .bearer, secret: "tok-42"))
+
+        let keyRef = try PlatformFeedAdapter.normalize("https://feeds.example.invalid/rss?API_KEY=key-7&key=ignored&q=news")
+        guard case .directFeed(let keyURL, let keyCredentials) = keyRef else {
+            return XCTFail("Expected a direct feed")
+        }
+        XCTAssertEqual(keyURL.absoluteString, "https://feeds.example.invalid/rss?q=news")
+        XCTAssertEqual(keyCredentials, SourceCredentials(kind: .apiKey, secret: "key-7"))
+        XCTAssertEqual(keyCredentials.httpHeaders, [SourceCredentials.defaultAPIKeyHeader: "key-7"])
+    }
+
+    func testExplicitCredentialsOverrideEmbeddedCredentials() throws {
+        let manual = SourceCredentials(kind: .bearer, secret: "manual-token")
+        let reference = try PlatformFeedAdapter.normalize(
+            "https://alice:secret@feeds.example.invalid/rss?token=embedded",
+            credentials: manual)
+        guard case .directFeed(let url, let credentials) = reference else {
+            return XCTFail("Expected a direct feed")
+        }
+        XCTAssertEqual(credentials, manual)
+        XCTAssertEqual(url.absoluteString, "https://feeds.example.invalid/rss")
+        XCTAssertFalse(url.absoluteString.contains("embedded"))
+    }
+
+    func testStoredFeedURLNeverContainsCredentials() throws {
+        let inputs = [
+            "https://alice:s3cr3t@feeds.example.invalid/rss",
+            "https://feeds.example.invalid/rss?token=tok-42",
+            "https://feeds.example.invalid/rss?api_key=key-7",
+        ]
+        let markers = ["alice", "s3cr3t", "tok-42", "key-7"]
+        for input in inputs {
+            let reference = try PlatformFeedAdapter.normalize(input)
+            guard case .directFeed(let url, let credentials) = reference else {
+                XCTFail("Expected a direct feed for \(input)")
+                continue
+            }
+            XCTAssertNotEqual(credentials.kind, .none)
+            for marker in markers {
+                XCTAssertFalse(url.absoluteString.contains(marker), "Leaked \(marker) into \(url.absoluteString)")
+            }
+            XCTAssertNil(URLComponents(url: url, resolvingAgainstBaseURL: false)?.user)
+            XCTAssertNil(URLComponents(url: url, resolvingAgainstBaseURL: false)?.password)
+        }
+    }
+
+    func testCredentialHTTPHeadersMapping() {
+        XCTAssertEqual(SourceCredentials().httpHeaders, [:])
+        XCTAssertEqual(
+            SourceCredentials(kind: .basic, username: "alice", secret: "s3cr3t").httpHeaders,
+            ["Authorization": "Basic YWxpY2U6czNjcjN0"])
+        XCTAssertEqual(
+            SourceCredentials(kind: .bearer, secret: "tok-42").httpHeaders,
+            ["Authorization": "Bearer tok-42"])
+        XCTAssertEqual(
+            SourceCredentials(kind: .apiKey, secret: "key-7", header: "X-Custom-Key").httpHeaders,
+            ["X-Custom-Key": "key-7"])
+        XCTAssertEqual(
+            SourceCredentials(kind: .apiKey, secret: "key-7").httpHeaders,
+            ["X-API-Key": "key-7"])
+        XCTAssertEqual(SourceCredentials(kind: .bearer).httpHeaders, [:])
+        XCTAssertEqual(SourceCredentials(kind: .apiKey, secret: "key-7", header: "X-Bad\r\nHeader").httpHeaders,
+                       ["X-API-Key": "key-7"])
+        XCTAssertEqual(SourceCredentials(kind: .bearer, secret: "tok\r\nInjected").httpHeaders,
+                       ["Authorization": "Bearer tokInjected"])
     }
 
     // MARK: - RSS 2.0

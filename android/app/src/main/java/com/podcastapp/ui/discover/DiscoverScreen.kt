@@ -12,6 +12,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -21,14 +23,20 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.podcastapp.data.feed.CredentialKind
+import com.podcastapp.data.feed.SourceCredentials
 import com.podcastapp.data.feed.platformLabel
 import com.podcastapp.ui.SharedImport
 import com.podcastapp.ui.components.InlineIssue
@@ -48,6 +56,27 @@ fun DiscoverScreen(
             viewModel.acceptShared(initialImport.text)
             onInitialImportConsumed()
         }
+    }
+    // 认证输入只保存在本次组合的局部状态：不进入 ViewModel 状态、不落盘、不使用 rememberSaveable。
+    var authKind by remember { mutableStateOf(CredentialKind.NONE) }
+    var username by remember { mutableStateOf("") }
+    var secret by remember { mutableStateOf("") }
+    var headerName by remember { mutableStateOf("X-API-Key") }
+    var authMenuExpanded by remember { mutableStateOf(false) }
+    val credentials = when (authKind) {
+        CredentialKind.NONE -> SourceCredentials()
+        CredentialKind.BASIC -> SourceCredentials(kind = CredentialKind.BASIC, username = username, secret = secret)
+        CredentialKind.BEARER -> SourceCredentials(kind = CredentialKind.BEARER, secret = secret)
+        CredentialKind.API_KEY -> SourceCredentials(
+            kind = CredentialKind.API_KEY,
+            secret = secret,
+            header = headerName.ifBlank { "X-API-Key" },
+        )
+    }
+    val startImport = {
+        val selected = credentials
+        secret = ""
+        viewModel.`import`(selected)
     }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 20.dp),
@@ -74,20 +103,93 @@ fun DiscoverScreen(
                 )
             },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = { if (state.input.isNotBlank()) viewModel.`import`() }),
+            keyboardActions = KeyboardActions(onDone = { if (state.input.isNotBlank()) startImport() }),
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+
+        Text("来源认证（可选）", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
+        Text(
+            "凭据只随请求发送给该 feed 的主机，不经过任何第三方；公开 feed 请选择“无”。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Button(
+            onClick = { authMenuExpanded = true },
+            enabled = !state.loading,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("认证方式：${credentialKindLabel(authKind)}")
+        }
+        DropdownMenu(
+            expanded = authMenuExpanded,
+            onDismissRequest = { authMenuExpanded = false },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            CredentialKind.values().forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(credentialKindLabel(option)) },
+                    onClick = {
+                        authKind = option
+                        secret = ""
+                        authMenuExpanded = false
+                    },
+                )
+            }
+        }
+        if (authKind == CredentialKind.BASIC) {
+            OutlinedTextField(
+                value = username,
+                onValueChange = { username = it },
+                enabled = !state.loading,
+                label = { Text("用户名") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (authKind != CredentialKind.NONE) {
+            OutlinedTextField(
+                value = secret,
+                onValueChange = { secret = it },
+                enabled = !state.loading,
+                label = {
+                    Text(
+                        when (authKind) {
+                            CredentialKind.BASIC -> "密码"
+                            CredentialKind.BEARER -> "Bearer Token"
+                            CredentialKind.API_KEY -> "API Key"
+                            CredentialKind.NONE -> ""
+                        }
+                    )
+                },
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (authKind == CredentialKind.API_KEY) {
+            OutlinedTextField(
+                value = headerName,
+                onValueChange = { headerName = it },
+                enabled = !state.loading,
+                label = { Text("API Key 头名") },
+                placeholder = { Text("X-API-Key") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
         val error = state.error
         if (error != null) {
             InlineIssue(
                 message = error,
-                onRetry = { viewModel.`import`() },
+                onRetry = { startImport() },
                 onDismiss = { viewModel.setInput(state.input) },
             )
         } else {
             Button(
-                onClick = { viewModel.`import`() },
+                onClick = { startImport() },
                 enabled = !state.loading && state.input.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -140,6 +242,13 @@ fun DiscoverScreen(
             }
         }
     }
+}
+
+private fun credentialKindLabel(kind: CredentialKind): String = when (kind) {
+    CredentialKind.NONE -> "无"
+    CredentialKind.BASIC -> "Basic 用户名密码"
+    CredentialKind.BEARER -> "Bearer Token"
+    CredentialKind.API_KEY -> "API Key"
 }
 
 private fun durationLabel(seconds: Int): String {

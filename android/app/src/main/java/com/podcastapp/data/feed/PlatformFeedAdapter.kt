@@ -2,6 +2,7 @@ package com.podcastapp.data.feed
 
 import java.io.StringReader
 import java.net.URI
+import java.net.URLDecoder
 import java.net.URISyntaxException
 import java.util.Locale
 import javax.xml.XMLConstants
@@ -25,6 +26,20 @@ import org.xml.sax.SAXParseException
 /** 链接所属平台。DIRECT 表示可直接当作 feed 地址使用。 */
 enum class FeedPlatform { DIRECT, APPLE, SPOTIFY, XIAOYUZHOU, XIMALAYA }
 
+/** 公开 feed 的凭据类型：无、HTTP Basic、Bearer Token、请求头 API Key。 */
+enum class CredentialKind { NONE, BASIC, BEARER, API_KEY }
+
+/**
+ * 访问公开 feed 所需的凭据。只进入加密凭据存储，绝不写入 URL 或订阅 JSON。
+ * [header] 仅在 [CredentialKind.API_KEY] 时作为请求头名使用。
+ */
+data class SourceCredentials(
+    val kind: CredentialKind = CredentialKind.NONE,
+    val username: String = "",
+    val secret: String = "",
+    val header: String = "X-API-Key",
+)
+
 /** 归一化后的播客源引用。 */
 sealed interface FeedReference {
     /** 输入链接的规范形式（去除首尾空白后的原样 http(s) URL）。 */
@@ -35,8 +50,11 @@ sealed interface FeedReference {
 
     val platform: FeedPlatform
 
-    /** 普通 RSS / Atom / feed 直链。 */
-    data class DirectFeed(override val url: String) : FeedReference {
+    /** 普通 RSS / Atom / feed 直链；url 为已移除凭据的干净地址。 */
+    data class DirectFeed(
+        override val url: String,
+        val credentials: SourceCredentials = SourceCredentials(),
+    ) : FeedReference {
         override val fetchUrl: String get() = url
         override val platform: FeedPlatform get() = FeedPlatform.DIRECT
     }
@@ -96,14 +114,26 @@ object PlatformFeedAdapter {
 
     /**
      * 把用户输入归一化为 [FeedReference]。
-     * 拒绝控制字符、userinfo、非法 host 以及非 http(s) 协议；其余合法 http(s) 链接均为 [FeedReference.DirectFeed]。
+     *
+     * URL 中的 user:pass@ 以及 ?token= / ?api_key= / ?key= 会被提取为 [SourceCredentials]
+     * 并从返回的 url 中移除；URL 中的凭据优先于显式传入的 [credentials]。
+     * 拒绝控制字符、歧义 authority、非法 host 以及非 http(s) 协议。
      */
-    fun normalize(input: String): Result<FeedReference> = runCatching {
+    fun normalize(
+        input: String,
+        credentials: SourceCredentials = SourceCredentials(),
+    ): Result<FeedReference> = runCatching {
         require(!input.any { it.isISOControl() }) { "Control characters are not allowed in a URL" }
         val raw = input.trim()
         require(raw.isNotEmpty()) { "Input is blank" }
-        val uri = parseHttpUri(raw) ?: throw IllegalArgumentException("Only http(s) URLs with a valid host are supported")
-        classify(raw, uri)
+        // 反斜杠/空白可能造成 authority 误判，必须在提取凭据之前拒绝。
+        require(!raw.any { it == '\\' || it.isWhitespace() }) {
+            "Only http(s) URLs with a valid host are supported"
+        }
+        val sanitized = stripUrlCredentials(raw)
+        val uri = parseHttpUri(sanitized.url)
+            ?: throw IllegalArgumentException("Only http(s) URLs with a valid host are supported")
+        classify(sanitized.url, uri, sanitized.credentials ?: credentials)
     }
 
     /** 解析 OPML，提取 outline 的 xmlUrl/title，按 xmlUrl 去重，最多 500 条，输入上限 4 MiB。 */
@@ -147,7 +177,7 @@ object PlatformFeedAdapter {
         )
     }
 
-    private fun classify(raw: String, uri: URI): FeedReference {
+    private fun classify(raw: String, uri: URI, credentials: SourceCredentials): FeedReference {
         val host = requireNotNull(uri.host).lowercase(Locale.ROOT)
         val path = uri.path.orEmpty()
         when (host) {
@@ -177,8 +207,82 @@ object PlatformFeedAdapter {
                 }
             }
         }
-        return FeedReference.DirectFeed(raw)
+        return FeedReference.DirectFeed(raw, credentials)
     }
+
+    /** 提取 URL 内嵌凭据，返回去掉凭据之后的 URL；没有内嵌凭据时 [credentials] 为 null。 */
+    private fun stripUrlCredentials(raw: String): SanitizedUrl {
+        var url = raw
+        var extracted: SourceCredentials? = null
+
+        // user:pass@ —— 多个 @ 的 authority 有歧义，保留原样交给 parseHttpUri 拒绝。
+        val schemeEnd = url.indexOf("://")
+        if (schemeEnd > 0) {
+            val authorityStart = schemeEnd + 3
+            val rawEnd = url.indexOfAny(charArrayOf('/', '?', '#'), authorityStart)
+            val authorityEnd = if (rawEnd < 0) url.length else rawEnd
+            val authority = url.substring(authorityStart, authorityEnd)
+            val at = authority.indexOf('@')
+            if (at >= 0 && authority.indexOf('@', at + 1) < 0) {
+                val userInfo = authority.substring(0, at)
+                if (userInfo.isNotEmpty()) {
+                    val colon = userInfo.indexOf(':')
+                    extracted = SourceCredentials(
+                        kind = CredentialKind.BASIC,
+                        username = decodeComponent(if (colon >= 0) userInfo.substring(0, colon) else userInfo),
+                        secret = decodeComponent(if (colon >= 0) userInfo.substring(colon + 1) else ""),
+                    )
+                }
+                url = url.substring(0, authorityStart) + authority.substring(at + 1) + url.substring(authorityEnd)
+            }
+        }
+
+        // token / api_key / key —— 其余查询参数原样保留（含原有编码与顺序）。
+        val queryStart = url.indexOf('?')
+        if (queryStart >= 0) {
+            val fragmentAt = url.indexOf('#', queryStart + 1)
+            val queryEnd = if (fragmentAt < 0) url.length else fragmentAt
+            val kept = ArrayList<String>()
+            var token: String? = null
+            var apiKey: String? = null
+            url.substring(queryStart + 1, queryEnd).split('&').forEach { pair ->
+                if (pair.isEmpty()) return@forEach
+                val eq = pair.indexOf('=')
+                val name = if (eq >= 0) pair.substring(0, eq) else pair
+                val value = if (eq >= 0) pair.substring(eq + 1) else ""
+                when (name.lowercase(Locale.ROOT)) {
+                    "token" -> token = decodeComponent(value)
+                    "api_key", "key" -> {
+                        if (apiKey == null) apiKey = decodeComponent(value)
+                    }
+                    else -> kept.add(pair)
+                }
+            }
+            url = if (kept.isEmpty()) {
+                url.substring(0, queryStart) + url.substring(queryEnd)
+            } else {
+                url.substring(0, queryStart + 1) + kept.joinToString("&") + url.substring(queryEnd)
+            }
+            val queryCredentials = when {
+                token != null -> SourceCredentials(kind = CredentialKind.BEARER, secret = token.orEmpty())
+                apiKey != null -> SourceCredentials(kind = CredentialKind.API_KEY, secret = apiKey.orEmpty())
+                else -> null
+            }
+            if (queryCredentials != null) {
+                extracted = extracted?.copy(
+                    kind = queryCredentials.kind,
+                    secret = queryCredentials.secret,
+                ) ?: queryCredentials
+            }
+        }
+        return SanitizedUrl(url, extracted)
+    }
+
+    private fun decodeComponent(value: String): String = runCatching {
+        URLDecoder.decode(value, Charsets.UTF_8.name())
+    }.getOrDefault(value)
+
+    private data class SanitizedUrl(val url: String, val credentials: SourceCredentials?)
 
     private fun parseHttpUri(raw: String): URI? {
         if (raw.isEmpty() || raw.length > MAX_URL_LENGTH) return null

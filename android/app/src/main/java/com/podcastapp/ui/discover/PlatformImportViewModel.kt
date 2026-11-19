@@ -7,6 +7,7 @@ import com.podcastapp.data.feed.FeedPlatform
 import com.podcastapp.data.feed.LocalFeed
 import com.podcastapp.data.feed.LocalPodcastLibrary
 import com.podcastapp.data.feed.PlatformFeedAdapter
+import com.podcastapp.data.feed.SourceCredentials
 import com.podcastapp.data.remote.EpisodeDto
 import com.podcastapp.playback.PlaybackHolder
 import kotlinx.coroutines.CancellationException
@@ -55,13 +56,14 @@ class PlatformImportViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    fun `import`() {
+    /** 凭据仅作为一次性参数传入，不写入 UI 状态或本地存储。 */
+    fun `import`(credentials: SourceCredentials = SourceCredentials()) {
         if (_state.value.loading) return
         val input = _state.value.input
         _state.value = _state.value.copy(loading = true, error = null, message = null)
         viewModelScope.launch {
             try {
-                val imported = library.`import`(input).getOrThrow()
+                val imported = library.`import`(input, credentials).getOrThrow()
                 _state.value = _state.value.copy(
                     loading = false,
                     input = "",

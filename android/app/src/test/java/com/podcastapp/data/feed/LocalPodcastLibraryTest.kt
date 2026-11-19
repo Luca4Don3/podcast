@@ -3,6 +3,7 @@ package com.podcastapp.data.feed
 import com.podcastapp.data.remote.SettingsDto
 import java.io.File
 import java.nio.file.Files
+import java.util.Base64
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -14,8 +15,16 @@ class LocalPodcastLibraryTest {
 
     private fun tempDir(): File = Files.createTempDirectory("local-podcast-test").toFile().also { it.deleteOnExit() }
 
+    private fun store(): SourceCredentialStore = SourceCredentialStore(InMemoryCredentialStorage())
+
     private fun library(dir: File, fetcher: (String) -> String): LocalPodcastLibrary =
         LocalPodcastLibrary(dir, fetcher, true)
+
+    private fun libraryWithCredentials(
+        dir: File,
+        credentialStore: SourceCredentialStore,
+        fetcher: (String, SourceCredentials) -> String,
+    ): LocalPodcastLibrary = LocalPodcastLibrary(dir, fetcher, credentialStore, true)
 
     private fun rss(
         title: String,
@@ -260,6 +269,118 @@ class LocalPodcastLibraryTest {
         assertEquals(SettingsDto(), partial.settings)
         assertTrue(partial.progress.isEmpty())
         assertTrue(partial.queued.isEmpty())
+    }
+
+
+    @Test fun credentialHeadersCoverBasicBearerAndApiKey() {
+        val basic = credentialHeaders(SourceCredentials(CredentialKind.BASIC, "alice", "s3cr3t"))
+        assertEquals(1, basic.size)
+        assertEquals(
+            "Basic " + Base64.getEncoder().encodeToString("alice:s3cr3t".toByteArray(Charsets.UTF_8)),
+            basic["Authorization"],
+        )
+        assertEquals(
+            "Bearer tok-1",
+            credentialHeaders(SourceCredentials(CredentialKind.BEARER, secret = "tok-1"))["Authorization"],
+        )
+        assertEquals(
+            "k-1",
+            credentialHeaders(
+                SourceCredentials(CredentialKind.API_KEY, secret = "k-1", header = "X-Private-Key"),
+            )["X-Private-Key"],
+        )
+        assertTrue(credentialHeaders(SourceCredentials()).isEmpty())
+    }
+
+    @Test fun urlCredentialsAreStoredSeparatelyAndNeverPersistedInJson() {
+        val dir = tempDir()
+        val credentialStore = store()
+        val requests = ArrayList<Pair<String, SourceCredentials>>()
+        val library = libraryWithCredentials(dir, credentialStore) { url, credentials ->
+            requests.add(url to credentials)
+            if (url == "https://example.com/feed") rss("私有节目") else error("unexpected fetch: $url")
+        }
+        runBlocking {
+            val imported = library.`import`("https://alice:secret-value@example.com/feed").getOrThrow().single()
+            assertEquals("https://example.com/feed", imported.feedUrl)
+            assertEquals("https://example.com/feed", imported.sourceUrl)
+            assertEquals("https://example.com/feed", imported.podcast.feedUrl)
+            assertEquals(1, requests.size)
+            assertEquals(CredentialKind.BASIC, requests.single().second.kind)
+            assertEquals("alice", requests.single().second.username)
+            assertEquals("secret-value", requests.single().second.secret)
+            assertEquals("secret-value", credentialStore.load(imported.id).secret)
+        }
+        val json = File(dir, "local_podcast_library.json").readText(Charsets.UTF_8)
+        assertFalse(json.contains("alice"))
+        assertFalse(json.contains("secret-value"))
+        assertFalse(json.contains("@example.com"))
+    }
+
+    @Test fun reimportAndRemoveKeepCredentialStoreInSync() {
+        val credentialStore = store()
+        val library = libraryWithCredentials(tempDir(), credentialStore) { url, _ ->
+            if (url == FEED) rss("标题") else error("unexpected fetch")
+        }
+        runBlocking {
+            val first = library.`import`(FEED, SourceCredentials(CredentialKind.BEARER, secret = "tok-1"))
+                .getOrThrow().single()
+            assertEquals("tok-1", credentialStore.load(first.id).secret)
+            val second = library.`import`(FEED, SourceCredentials(CredentialKind.BEARER, secret = "tok-2"))
+                .getOrThrow().single()
+            assertEquals(first.id, second.id)
+            assertEquals("tok-2", credentialStore.load(second.id).secret)
+            library.remove(first.id)
+            assertEquals(CredentialKind.NONE, credentialStore.load(first.id).kind)
+        }
+    }
+
+    @Test fun refreshUsesStoredCredentials() {
+        val credentialStore = store()
+        val seen = ArrayList<SourceCredentials>()
+        val library = libraryWithCredentials(tempDir(), credentialStore) { url, credentials ->
+            if (url == FEED) {
+                seen.add(credentials)
+                rss("标题")
+            } else error("unexpected fetch")
+        }
+        runBlocking {
+            val first = library.`import`(
+                FEED,
+                SourceCredentials(CredentialKind.API_KEY, secret = "k-1", header = "X-Key"),
+            ).getOrThrow().single()
+            seen.clear()
+            library.refresh(first.id).getOrThrow()
+            assertEquals(CredentialKind.API_KEY, seen.single().kind)
+            assertEquals("X-Key", seen.single().header)
+            assertEquals("k-1", seen.single().secret)
+        }
+    }
+
+    @Test fun redirectForwardsCredentialsOnlyOnSameHttpsHost() {
+        val credentials = SourceCredentials(CredentialKind.BEARER, secret = "tok")
+        assertEquals(
+            credentials,
+            credentialsForRedirect("https://example.com/a.xml", "https://example.com/b.xml", credentials),
+        )
+        listOf(
+            "https://cdn.example.com/b.xml",
+            "http://example.com/b.xml",
+            "http://cdn.example.com/b.xml",
+        ).forEach { target ->
+            assertEquals(
+                CredentialKind.NONE,
+                credentialsForRedirect("https://example.com/a.xml", target, credentials).kind,
+            )
+        }
+        assertEquals(
+            CredentialKind.NONE,
+            credentialsForRedirect(
+                "https://example.com/a.xml",
+                "https://example.com/b.xml",
+                SourceCredentials(),
+            ).kind,
+        )
     }
 
     private companion object {

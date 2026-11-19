@@ -13,6 +13,10 @@
 
 官方 API 通常需要开发者凭据、用户授权和平台审核；未取得这些条件前不会声称已接入。公开网页链接的解析只用于识别平台，不代表获得内容授权。
 
+## 来源认证
+
+部分播客源要求账号密码或密钥。客户端支持每个来源单独配置：链接中的 `user:pass@` 会转换为 HTTP Basic，`?token=`/`?access_token=` 转换为 Bearer，`?api_key=`/`?key=` 转换为 API Key 请求头；也可以在导入页单独填写这三类凭据。凭据会从保存的 feed URL 中移除，按来源加密保存（Android EncryptedSharedPreferences，Apple Keychain），只随该来源请求发送，不经过任何中间服务。跨主机或 HTTPS 降级跳转会剥离认证头。
+
 ## 接收分享链接
 
 Android 支持系统分享菜单中的 `text/plain` 链接，以及来自 Apple Podcasts、Spotify、小宇宙、喜马拉雅公开节目页的 HTTPS 链接。应用会提取链接、自动打开导入页并开始解析；解析结果仍受上述公开 feed 规则限制。

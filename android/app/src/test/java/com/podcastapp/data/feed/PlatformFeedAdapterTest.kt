@@ -109,15 +109,66 @@ class PlatformFeedAdapterTest {
         }
     }
 
-    @Test fun rejectsUserInfo() {
-        listOf(
-            "https://user:pass@example.com/feed",
-            "https://user@example.com/feed",
-            "https://user%40name@example.com/feed",
-            "http://a@b@example.com/feed",
-        ).forEach { url ->
-            assertTrue("Expected rejection: $url", PlatformFeedAdapter.normalize(url).isFailure)
-        }
+    // ---------- normalize: URL 内嵌凭据 ----------
+
+    @Test fun extractsUserInfoCredentialsAndRemovesThemFromUrl() {
+        val ref = normalized("https://alice:s3cr3t@example.com/feed") as FeedReference.DirectFeed
+        assertEquals("https://example.com/feed", ref.url)
+        assertEquals(ref.url, ref.fetchUrl)
+        assertEquals(CredentialKind.BASIC, ref.credentials.kind)
+        assertEquals("alice", ref.credentials.username)
+        assertEquals("s3cr3t", ref.credentials.secret)
+
+        val userOnly = normalized("https://alice@example.com/feed") as FeedReference.DirectFeed
+        assertEquals("https://example.com/feed", userOnly.url)
+        assertEquals(CredentialKind.BASIC, userOnly.credentials.kind)
+        assertEquals("alice", userOnly.credentials.username)
+        assertEquals("", userOnly.credentials.secret)
+
+        val encoded = normalized("https://a%40b:p%3Aq@example.com/feed") as FeedReference.DirectFeed
+        assertEquals("a@b", encoded.credentials.username)
+        assertEquals("p:q", encoded.credentials.secret)
+        assertEquals("https://example.com/feed", encoded.url)
+    }
+
+    @Test fun rejectsAmbiguousAuthorityWithMultipleAtSigns() {
+        assertTrue(PlatformFeedAdapter.normalize("http://a@b@example.com/feed").isFailure)
+    }
+
+    @Test fun extractsTokenApiKeyAndKeyQueryCredentials() {
+        val bearer = normalized("https://example.com/feed?token=tok-123&format=rss") as FeedReference.DirectFeed
+        assertEquals("https://example.com/feed?format=rss", bearer.url)
+        assertEquals(CredentialKind.BEARER, bearer.credentials.kind)
+        assertEquals("tok-123", bearer.credentials.secret)
+
+        val apiKey = normalized("https://example.com/feed?api_key=k-1") as FeedReference.DirectFeed
+        assertEquals("https://example.com/feed", apiKey.url)
+        assertEquals(CredentialKind.API_KEY, apiKey.credentials.kind)
+        assertEquals("k-1", apiKey.credentials.secret)
+        assertEquals("X-API-Key", apiKey.credentials.header)
+
+        val key = normalized("https://example.com/feed?key=k-2&v=1#frag") as FeedReference.DirectFeed
+        assertEquals("https://example.com/feed?v=1#frag", key.url)
+        assertEquals(CredentialKind.API_KEY, key.credentials.kind)
+        assertEquals("k-2", key.credentials.secret)
+    }
+
+    @Test fun urlCredentialsTakePrecedenceOverExplicitCredentials() {
+        val ref = PlatformFeedAdapter.normalize(
+            "https://alice:pw@example.com/feed?token=from-url",
+            SourceCredentials(kind = CredentialKind.BEARER, secret = "from-argument"),
+        ).getOrThrow() as FeedReference.DirectFeed
+        assertEquals(CredentialKind.BEARER, ref.credentials.kind)
+        assertEquals("from-url", ref.credentials.secret)
+        assertEquals("alice", ref.credentials.username)
+        assertEquals("https://example.com/feed", ref.url)
+    }
+
+    @Test fun explicitCredentialsSurviveWhenUrlHasNone() {
+        val explicit = SourceCredentials(CredentialKind.API_KEY, "", "secret", "X-Custom-Key")
+        val ref = PlatformFeedAdapter.normalize("https://example.com/feed", explicit).getOrThrow()
+        assertEquals(explicit, (ref as FeedReference.DirectFeed).credentials)
+        assertEquals(SourceCredentials(), (normalized("https://example.com/feed") as FeedReference.DirectFeed).credentials)
     }
 
     @Test fun rejectsControlCharacters() {

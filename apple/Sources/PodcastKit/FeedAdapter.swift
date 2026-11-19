@@ -3,9 +3,63 @@ import Foundation
 import FoundationNetworking
 #endif
 
+/// How a single feed source authenticates. Never stored inside a feed URL.
+public enum CredentialKind: String, Codable, Hashable, Sendable {
+    case none, basic, bearer, apiKey
+}
+
+/// Credentials for one feed source. The secret is never written into a stored URL.
+public struct SourceCredentials: Equatable, Codable, Sendable {
+    public static let defaultAPIKeyHeader = "X-API-Key"
+    private static let headerNamePunctuation = Set("!#$%&'*+-.^`|~".utf8)
+
+    public let kind: CredentialKind
+    public let username: String
+    public let secret: String
+    public let header: String
+
+    public init(kind: CredentialKind = .none, username: String = "", secret: String = "", header: String = "") {
+        self.kind = kind
+        self.username = username
+        self.secret = secret
+        self.header = header
+    }
+
+    /// HTTP headers applied to the feed request, empty for `.none` or an empty secret.
+    public var httpHeaders: [String: String] {
+        switch kind {
+        case .none:
+            return [:]
+        case .basic:
+            let token = Data("\(username):\(secret)".utf8).base64EncodedString()
+            return ["Authorization": "Basic \(token)"]
+        case .bearer:
+            let value = Self.safeHeaderValue(secret)
+            return value.isEmpty ? [:] : ["Authorization": "Bearer \(value)"]
+        case .apiKey:
+            let value = Self.safeHeaderValue(secret)
+            return value.isEmpty ? [:] : [Self.safeHeaderName(header): value]
+        }
+    }
+
+    /// Rejects CRLF and other malformed header names before a URLRequest is built.
+    public static func safeHeaderName(_ raw: String) -> String {
+        let candidate = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty, candidate.utf8.allSatisfy({ byte in
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+                || headerNamePunctuation.contains(byte)
+        }) else { return defaultAPIKeyHeader }
+        return candidate
+    }
+
+    private static func safeHeaderValue(_ raw: String) -> String {
+        String(raw.filter { $0 != "\r" && $0 != "\n" })
+    }
+}
+
 /// A validated, non-networking description of where a podcast feed comes from.
 public enum FeedReference: Equatable, Sendable {
-    case directFeed(URL)
+    case directFeed(URL, SourceCredentials)
     case appleLookup(URL)
     case webMetadata(URL, platform: String)
 }
@@ -76,8 +130,12 @@ public enum PlatformFeedAdapter {
 
     // MARK: - Link normalization
 
-    public static func normalize(_ input: String) throws -> FeedReference {
-        let components = try canonicalComponents(from: input)
+    public static func normalize(_ input: String,
+                                 credentials: SourceCredentials = SourceCredentials()) throws -> FeedReference {
+        let canonical = try canonicalComponents(from: input)
+        let components = canonical.components
+        // Explicit UI input takes precedence over credentials embedded in the URL.
+        let resolvedCredentials = credentials.kind == .none ? canonical.credentials : credentials
         let host = (components.host ?? "").lowercased()
         let segments = (components.percentEncodedPath as NSString).pathComponents
         let decoded = segments.compactMap { $0.removingPercentEncoding }
@@ -110,7 +168,7 @@ public enum PlatformFeedAdapter {
             expectedPath = "album"
         default:
             guard let url = components.url else { throw FeedAdapterError.invalidReference }
-            return .directFeed(url)
+            return .directFeed(url, resolvedCredentials)
         }
 
         guard parts.count == 2, parts[0] == expectedPath, isSafeID(parts[1]) else {
@@ -125,7 +183,8 @@ public enum PlatformFeedAdapter {
     }
 
     /// Rejects ambiguous authorities and builds a canonical http(s) URL.
-    private static func canonicalComponents(from input: String) throws -> URLComponents {
+    /// Userinfo and token/api_key/key query items are lifted into credentials and removed.
+    private static func canonicalComponents(from input: String) throws -> (components: URLComponents, credentials: SourceCredentials) {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
         let forbidden = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
         guard !value.isEmpty,
@@ -136,8 +195,6 @@ public enum PlatformFeedAdapter {
               scheme == "http" || scheme == "https",
               let encodedHost = components.percentEncodedHost,
               !encodedHost.isEmpty,
-              components.user == nil, components.password == nil,
-              components.percentEncodedUser == nil, components.percentEncodedPassword == nil,
               components.port.map({ (1...65535).contains($0) }) ?? true,
               let decodedHost = encodedHost.removingPercentEncoding,
               !decodedHost.isEmpty,
@@ -147,13 +204,48 @@ public enum PlatformFeedAdapter {
               !decodedHost.contains("#")
         else { throw FeedAdapterError.invalidReference }
 
+        let embedded = extractCredentials(from: &components)
         components.scheme = scheme
         components.user = nil
         components.password = nil
+        components.percentEncodedUser = nil
+        components.percentEncodedPassword = nil
         components.fragment = nil
         components.percentEncodedHost = encodedHost.lowercased()
         guard components.url != nil else { throw FeedAdapterError.invalidReference }
-        return components
+        return (components, embedded)
+    }
+
+    /// Strips credential-bearing pieces from the URL, returning them as source credentials.
+    /// Userinfo wins over query tokens; all credential query items are removed regardless.
+    private static func extractCredentials(from components: inout URLComponents) -> SourceCredentials {
+        var token: String?
+        var apiKey: String?
+        if let query = components.percentEncodedQuery {
+            var kept: [String] = []
+            for pair in query.split(separator: "&", omittingEmptySubsequences: false) {
+                let parts = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                let rawName = parts.first.map(String.init) ?? ""
+                let name = (rawName.removingPercentEncoding ?? rawName).lowercased()
+                let rawValue = parts.count > 1 ? String(parts[1]) : ""
+                let value = rawValue.removingPercentEncoding ?? rawValue
+                switch name {
+                case "token", "access_token":
+                    if token == nil, !value.isEmpty { token = value }
+                case "api_key", "apikey", "key":
+                    if apiKey == nil, !value.isEmpty { apiKey = value }
+                default:
+                    kept.append(String(pair))
+                }
+            }
+            components.percentEncodedQuery = kept.isEmpty ? nil : kept.joined(separator: "&")
+        }
+        if let user = components.user, !user.isEmpty {
+            return SourceCredentials(kind: .basic, username: user, secret: components.password ?? "")
+        }
+        if let token { return SourceCredentials(kind: .bearer, secret: token) }
+        if let apiKey { return SourceCredentials(kind: .apiKey, secret: apiKey) }
+        return SourceCredentials()
     }
 
     private static func isSafeID(_ value: String) -> Bool {
