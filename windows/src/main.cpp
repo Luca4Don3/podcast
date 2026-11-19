@@ -62,7 +62,7 @@ std::vector<double> g_rates = {0.75, 1.0, 1.25, 1.5, 2.0};
 size_t g_rate_index = 1;
 const wchar_t *kWindowClass = L"PodcastWindowsW1";
 podcast::LocalStore g_store;
-PlayQueue g_queue;
+podcast::PlayQueue g_queue;
 std::string g_selected_feed;
 std::vector<podcast::Episode> g_visible_episodes;
 
@@ -394,7 +394,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                 g_store.setQueue(std::vector<std::string>(g_queue.items().begin(), g_queue.items().end()));
                 g_store.save();
                 refresh_queue(hwnd);
-                load_uri(episode.audio_url);
+                load_uri(wide(episode.audio_url));
             }
         }
         return 0;
