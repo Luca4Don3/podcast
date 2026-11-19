@@ -37,6 +37,11 @@ jobs:
           yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "ndk;28.2.13676358" "cmake;3.22.1" >/dev/null
           yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - name: Test shared C and C++ components
+        run: |
+          cmake -S android/app/src/main/cpp -B output/native-host
+          cmake --build output/native-host --parallel 2
+          ctest --test-dir output/native-host --output-on-failure
       - name: Test and export APKs
         working-directory: android
         run: ./gradlew --no-daemon :app:testCompactUnitTest :app:exportCompactApks

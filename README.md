@@ -2,7 +2,7 @@
 
 参考 Apple Podcasts 的信息架构与交互，面向 Android、iPhone 和 iPad 的播客接收与播放客户端。应用直接读取公开 RSS/Atom、OPML 和平台分享链接；**不再要求自建后端，也不作为播客分发平台**。
 
-公开仓库：<https://github.com/Luca4Don3/podcast>。当前开发版本：1.8.0（client-only，尚未发布到 GitHub Release）。
+公开仓库：<https://github.com/Luca4Don3/podcast>。当前开发版本：1.9.0（client-only，尚未发布到 GitHub Release）。
 
 新版本 tag 仅构建 Android 手机／平板包和 iPhone／iPad 模拟器包；历史 Release 不覆盖。Apple 真机包仍需自己的签名。
 
@@ -19,6 +19,8 @@
 详见 [平台接入说明](<docs/PLATFORM_ADAPTERS.md>)。
 
 ## 客户端能力
+
+- **离线缓存**：每个订阅可选不缓存、最新 5 集、最新 10 集或全部，支持手动更新缓存。详见 [离线缓存](<docs/OFFLINE_CACHE.md>)。
 
 **Android**
 - 资料和播放：订阅、单集列表、封面、简介、Media3 后台播放、媒体通知、锁屏与有线/蓝牙耳机控制、音频焦点与断开暂停、变速、跳转与进度。

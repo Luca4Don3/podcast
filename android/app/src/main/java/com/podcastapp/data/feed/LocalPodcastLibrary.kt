@@ -21,6 +21,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -182,7 +184,7 @@ internal fun transportForRedirect(
 internal fun digestEnabled(credentials: SourceCredentials, transport: SourceTransport): Boolean =
     credentials.kind == CredentialKind.DIGEST || transport.digest
 
-private fun sha256Hex(value: String): String {
+internal fun sha256Hex(value: String): String {
     val bytes = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
     return buildString(bytes.size * 2) {
         for (byte in bytes) {
@@ -205,12 +207,14 @@ class LocalPodcastLibrary private constructor(
     private val storageDir: File,
     private val fetchText: (String, SourceCredentials, SourceTransport) -> String,
     private val credentialStore: SourceCredentialStore,
+    private val offlineCache: (() -> OfflinePodcastCache)? = null,
 ) {
 
     constructor(context: Context) : this(
         context.applicationContext.filesDir,
         Companion::fetchHttpText,
         SourceCredentialStore(context.applicationContext),
+        { OfflinePodcastCache.get(context.applicationContext) },
     )
 
     /** 仅供 JVM 单测注入临时目录、假响应与假凭据存储（兼容两参数 fetcher）。 */
@@ -279,6 +283,8 @@ class LocalPodcastLibrary private constructor(
 
     suspend fun remove(id: String) = withContext(Dispatchers.IO) {
         mutex.withLock {
+            val existing = _feeds.value.firstOrNull { it.id == id }
+            if (existing != null) offlineCache?.invoke()?.update(existing, OfflinePolicy.NONE)
             val next = _feeds.value.filterNot { it.id == id }
             persist(next)
             _feeds.value = next
@@ -310,6 +316,9 @@ class LocalPodcastLibrary private constructor(
 
     fun saveSettings(next: SettingsDto) = updateState { it.copy(settings = next) }
 
+    internal fun offlineAccess(id: String): OfflineSourceAccess =
+        OfflineSourceAccess(credentialStore.load(id), credentialStore.loadTransport(id))
+
     /** 用保存的公开 feed 地址重新拉取，保留原 ID、来源与首次导入时间。 */
     suspend fun refresh(id: String): Result<LocalFeed> = withContext(Dispatchers.IO) {
         mutex.withLock {
@@ -323,6 +332,7 @@ class LocalPodcastLibrary private constructor(
                     credentials = credentialStore.load(id),
                     transport = credentialStore.loadTransport(id),
                 ).copy(importedAt = existing.importedAt)
+                currentCoroutineContext().ensureActive()
                 val next = _feeds.value.map { if (it.id == id) updated else it }
                 persist(next)
                 _feeds.value = next
@@ -476,6 +486,7 @@ class LocalPodcastLibrary private constructor(
                     appContext.filesDir,
                     Companion::fetchHttpText,
                     SourceCredentialStore(appContext),
+                    { OfflinePodcastCache.get(appContext) },
                 ).also { instance = it }
             }
         }
@@ -540,7 +551,7 @@ class LocalPodcastLibrary private constructor(
                     credentialHeaders(requestCredentials).forEach { (name, value) -> header(name, value) }
                 }.build()
                 var result: String? = null
-                buildClient(requestCredentials, hopTransport).newCall(request).execute().use { response ->
+                buildSourceClient(requestCredentials, hopTransport).newCall(request).execute().use { response ->
                     when {
                         response.code in 300..399 -> {
                             if (hop == MAX_REDIRECTS) throw IOException("跳转次数过多")
@@ -562,7 +573,11 @@ class LocalPodcastLibrary private constructor(
         }
 
         /** 系统证书 + 自定义 CA、mTLS 密钥与 Digest Authenticator 都只作用于当前来源。 */
-        private fun buildClient(credentials: SourceCredentials, transport: SourceTransport): OkHttpClient {
+        internal fun buildSourceClient(
+            credentials: SourceCredentials,
+            transport: SourceTransport,
+            timeoutSeconds: Long = 45,
+        ): OkHttpClient {
             val builder = OkHttpClient.Builder()
                 .followRedirects(false)
                 .followSslRedirects(false)
@@ -570,7 +585,7 @@ class LocalPodcastLibrary private constructor(
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(20, TimeUnit.SECONDS)
                 .writeTimeout(15, TimeUnit.SECONDS)
-                .callTimeout(45, TimeUnit.SECONDS)
+                .callTimeout(timeoutSeconds, TimeUnit.SECONDS)
             val hasTlsMaterial = transport.customCaPem.isNotBlank() ||
                 transport.clientCertPem.isNotBlank() || transport.clientKeyPem.isNotBlank()
             if (hasTlsMaterial) {

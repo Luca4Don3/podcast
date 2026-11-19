@@ -59,6 +59,7 @@ private struct StoredFeed: Codable, Identifiable, Equatable, Sendable {
     var summary: String?
     var episodes: [StoredEpisode]
     var refreshedAt: Date?
+    var cachePolicy: FeedCachePolicy? // Missing in older libraries: no caching.
 
     init(id: String, sourceURL: String, title: String, author: String, summary: String?,
          episodes: [StoredEpisode], refreshedAt: Date? = Date()) {
@@ -495,20 +496,22 @@ private func safeMessage(_ error: Error, fallback: String) -> String {
 // MARK: - Direct HTTP(S) fetching via URLSession
 
 /// Per-session delegate: HTTPS policy, redirect sanitizing, custom CA, mTLS and Digest challenges.
-private final class FeedSessionDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
+class FeedSessionDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     private let transport: SourceTransport
     private let credentials: SourceCredentials
     private let protectedFields: Set<String>
     private let originalURL: URL?
+    private let sameOriginOnly: Bool
     private let clientCredential: URLCredential?
 #if canImport(Security)
     private let customAnchors: [SecCertificate]
 #endif
 
-    init(transport: SourceTransport, credentials: SourceCredentials, originalURL: URL?) {
+    init(transport: SourceTransport, credentials: SourceCredentials, originalURL: URL?, sameOriginOnly: Bool = false) {
         self.transport = transport
         self.credentials = credentials
         self.originalURL = originalURL
+        self.sameOriginOnly = sameOriginOnly
         self.protectedFields = Set(credentials.httpHeaders.keys)
 #if canImport(Security)
         self.customAnchors = Self.certificates(from: transport.customCaPem)
@@ -520,32 +523,49 @@ private final class FeedSessionDelegate: NSObject, URLSessionDelegate, URLSessio
 #endif
     }
 
+    static func ephemeralConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
+        return configuration
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
         guard let target = request.url,
-              transport.allowsRedirect(from: task.originalRequest?.url, to: target) else {
+              transport.allowsRedirect(from: task.originalRequest?.url, to: target),
+              !sameOriginOnly || FeedCacheMedia.sameOrigin(originalURL, target) else {
             completionHandler(nil)
             return
         }
         var sanitized = request
-        if SourceTransport.shouldStripCredentials(from: task.originalRequest?.url, to: target) {
+        if !FeedCacheMedia.sameOrigin(originalURL, target) {
             for field in protectedFields { sanitized.setValue(nil, forHTTPHeaderField: field) }
             sanitized.setValue(nil, forHTTPHeaderField: "Authorization")
         }
         completionHandler(sanitized)
     }
 
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        urlSession(session, didReceive: challenge, completionHandler: completionHandler)
+    }
+
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        let host = challenge.protectionSpace.host.lowercased()
-        let originalHost = originalURL?.host?.lowercased()
-        let crossHost = originalHost != nil && originalHost != host
+        let space = challenge.protectionSpace
+        let scheme = originalURL?.scheme?.lowercased()
+        let port = originalURL?.port ?? (scheme == "https" ? 443 : 80)
+        let crossOrigin = originalURL?.host?.lowercased() != space.host.lowercased() ||
+            scheme != space.protocol?.lowercased() || port != space.port || space.proxyType != nil
         switch challenge.protectionSpace.authenticationMethod {
         case NSURLAuthenticationMethodServerTrust:
 #if canImport(Security)
-            if !customAnchors.isEmpty, !crossHost, let trust = challenge.protectionSpace.serverTrust {
+            if !customAnchors.isEmpty, !crossOrigin, let trust = challenge.protectionSpace.serverTrust {
                 // Custom anchors are added to, not substituted for, the system trust store.
                 // anchorCertificatesOnly=false keeps full system validation in force.
                 SecTrustSetAnchorCertificates(trust, customAnchors as CFArray)
@@ -561,14 +581,15 @@ private final class FeedSessionDelegate: NSObject, URLSessionDelegate, URLSessio
 #endif
             completionHandler(.performDefaultHandling, nil)
         case NSURLAuthenticationMethodClientCertificate:
-            if !crossHost, let clientCredential {
+            if !crossOrigin, let clientCredential {
                 completionHandler(.useCredential, clientCredential)
             } else {
                 completionHandler(.cancelAuthenticationChallenge, nil)
             }
         case NSURLAuthenticationMethodHTTPDigest:
             let usesDigest = credentials.kind == .digest || transport.digest
-            if !crossHost, usesDigest, !credentials.username.isEmpty, !credentials.secret.isEmpty {
+            if !crossOrigin, usesDigest, challenge.previousFailureCount == 0,
+               !credentials.username.isEmpty, !credentials.secret.isEmpty {
                 // No static header: URLSession derives the Digest response from this
                 // credential only after the server answers 401 with a challenge.
                 completionHandler(.useCredential,
@@ -639,12 +660,7 @@ private enum FeedHTTP {
 
     private static func makeSession(transport: SourceTransport, credentials: SourceCredentials,
                                     originalURL: URL) -> URLSession {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.urlCache = nil
-        configuration.httpCookieStorage = nil
-        configuration.httpShouldSetCookies = false
-        configuration.urlCredentialStorage = nil
-        return URLSession(configuration: configuration,
+        URLSession(configuration: FeedSessionDelegate.ephemeralConfiguration(),
                           delegate: FeedSessionDelegate(transport: transport, credentials: credentials,
                                                         originalURL: originalURL),
                           delegateQueue: nil)
@@ -693,6 +709,8 @@ private final class LibrarySession: ObservableObject {
     @Published private(set) var isFetching = false
     @Published private(set) var addError: String?
     @Published private(set) var libraryError: String?
+    @Published private(set) var feedRefreshStatus: [String: FeedRefreshStatus] = [:]
+    private var feedRefreshTasks: [String: Task<Void, Never>] = [:]
     @Published private(set) var storageSources: [StoredNetworkSource] = []
     @Published private(set) var storageSelection: String?
     @Published private(set) var storageEntries: [WebDavEntry] = []
@@ -766,10 +784,20 @@ private final class LibrarySession: ObservableObject {
 
     func removeFeed(_ feedID: String) {
         guard let index = feeds.firstIndex(where: { $0.id == feedID }) else { return }
-        feeds.remove(at: index)
+        var updated = feeds
+        updated.remove(at: index)
+        guard saveFeeds(updated) else { return }
         if selection == feedID { selection = feeds.first?.id }
         FeedSecretStore.remove(for: feedID)
-        persist()
+        let task = feedRefreshTasks[feedID]
+        task?.cancel()
+        Task { @MainActor in
+            await task?.value
+            guard !feeds.contains(where: { $0.id == feedID }) else { return }
+            feedRefreshStatus.removeValue(forKey: feedID)
+            do { try FeedAudioCache(feedID: feedID).prune(keeping: []) }
+            catch { libraryError = "无法清理已移除订阅的离线缓存。" }
+        }
     }
 
     // MARK: - Network storage sources
@@ -974,9 +1002,113 @@ private final class LibrarySession: ObservableObject {
     }
 
     func play(_ episode: StoredEpisode, feedID: String) {
-        guard selection == feedID, let feed = selectedFeed,
-              feed.episodes.contains(where: { $0.id == episode.id }) else { return }
-        playback.play(episode)
+        guard selection == feedID, let feed = selectedFeed, feed.episodes.contains(episode) else { return }
+        var localURL: URL?
+        if (feed.cachePolicy ?? FeedCachePolicy.none) != .none,
+           let item = cacheItem(episode), let cache = try? FeedAudioCache(feedID: feedID) {
+            localURL = cache.localURL(for: item)
+        }
+        playback.play(episode, localURL: localURL)
+    }
+
+    enum FeedRefreshStatus {
+        case fetching, downloading(Int, Int), message(String)
+    }
+
+    func isRefreshingFeed(_ id: String) -> Bool { feedRefreshTasks[id] != nil }
+
+    func cancelFeedRefresh(_ id: String) { feedRefreshTasks[id]?.cancel() }
+
+    func setFeedCachePolicy(_ policy: FeedCachePolicy, for id: String) {
+        guard !isRefreshingFeed(id), let index = feeds.firstIndex(where: { $0.id == id }),
+              (feeds[index].cachePolicy ?? FeedCachePolicy.none) != policy else { return }
+        var updated = feeds
+        updated[index].cachePolicy = policy
+        guard saveFeeds(updated) else { return }
+        if policy == .none {
+            do {
+                try FeedAudioCache(feedID: id).prune(keeping: [])
+                feedRefreshStatus[id] = .message("已清除离线缓存。")
+            } catch {
+                feedRefreshStatus[id] = .message("无法清理缓存；可刷新订阅后重试。")
+            }
+        } else {
+            refreshFeed(id)
+        }
+    }
+
+    func refreshFeed(_ id: String) {
+        guard !isRefreshingFeed(id), let feed = feeds.first(where: { $0.id == id }) else { return }
+        feedRefreshStatus[id] = .fetching
+        feedRefreshTasks[id] = Task { @MainActor in
+            defer { feedRefreshTasks.removeValue(forKey: id) }
+            do {
+                guard let url = Self.safeHTTPURL(feed.sourceURL) else { throw FeedAddError.invalidReference }
+                let secrets = FeedSecretStore.load(for: id)
+                let data = try await FeedHTTP.data(from: url, credentials: secrets.credentials,
+                                                   transport: secrets.transport, limit: FeedHTTP.maximumFeedBytes)
+                let parsed = try PlatformFeedAdapter.parseFeed(data)
+                try Task.checkCancellation()
+                guard let index = feeds.firstIndex(where: { $0.id == id }) else { return }
+                var updated = feeds
+                if !parsed.title.isEmpty { updated[index].title = parsed.title }
+                updated[index].summary = parsed.description
+                updated[index].episodes = parsed.episodes.map(StoredEpisode.init)
+                updated[index].refreshedAt = Date()
+                guard saveFeeds(updated) else {
+                    feedRefreshStatus[id] = .message("无法保存订阅清单，已保留现有缓存。")
+                    return
+                }
+                await refreshAudioCache(updated[index], url: url, secrets: secrets)
+            } catch {
+                feedRefreshStatus[id] = .message(Task.isCancelled ? "已取消刷新。" : "无法刷新订阅，已保留现有缓存。")
+            }
+        }
+    }
+
+    private func cacheItem(_ episode: StoredEpisode) -> FeedAudioCache.Item? {
+        guard let url = URL(string: episode.audioUrl) else { return nil }
+        return FeedAudioCache.Item(episodeID: episode.id, mediaURL: url)
+    }
+
+    private func refreshAudioCache(_ feed: StoredFeed, url: URL, secrets: StoredFeedSecrets) async {
+        let id = feed.id
+        let policy = feed.cachePolicy ?? FeedCachePolicy.none
+        do {
+            try Task.checkCancellation()
+            let cache = try FeedAudioCache(feedID: id)
+            let candidates = feed.episodes.compactMap { episode -> (item: FeedAudioCache.Item, date: String?)? in
+                guard let item = cacheItem(episode), secrets.transport.allows(item.url) else { return nil }
+                return (item, episode.publishedAt)
+            }
+            let items = FeedAudioCache.plan(candidates, policy: policy)
+            if !items.isEmpty { try cache.prepare() }
+            var ready = 0
+            for item in items {
+                try Task.checkCancellation()
+                feedRefreshStatus[id] = .downloading(ready, items.count)
+                do {
+                    if cache.localURL(for: item) == nil {
+                        try await SubscriptionAudioDownload.save(item, in: cache, feedURL: url,
+                            credentials: secrets.credentials, transport: secrets.transport)
+                    }
+                    ready += 1
+                } catch {
+                    try Task.checkCancellation()
+                }
+            }
+            try Task.checkCancellation()
+            if ready == items.count { try cache.prune(keeping: items) }
+            if policy == .none {
+                feedRefreshStatus[id] = .message("订阅已刷新。")
+            } else if ready == items.count {
+                feedRefreshStatus[id] = .message("订阅已刷新，可离线播放 \(ready) 集。")
+            } else {
+                feedRefreshStatus[id] = .message("已缓存 \(ready)/\(items.count) 集；部分音频不可缓存，已保留现有缓存。")
+            }
+        } catch {
+            feedRefreshStatus[id] = .message(Task.isCancelled ? "已取消下载，完整缓存已保留。" : "无法更新离线缓存。")
+        }
     }
 
     @discardableResult
@@ -1114,10 +1246,12 @@ private final class LibrarySession: ObservableObject {
         } else {
             title = url.host ?? "播客"
         }
-        let feed = StoredFeed(id: Self.feedID(for: url), sourceURL: url.absoluteString, title: title,
+        var feed = StoredFeed(id: Self.feedID(for: url), sourceURL: url.absoluteString, title: title,
                               author: author, summary: parsed.description,
                               episodes: parsed.episodes.map { StoredEpisode($0) })
         if let index = feeds.firstIndex(where: { $0.id == feed.id }) {
+            cancelFeedRefresh(feed.id)
+            feed.cachePolicy = feeds[index].cachePolicy
             feeds[index] = feed
         } else {
             feeds.append(feed)
@@ -1127,12 +1261,18 @@ private final class LibrarySession: ObservableObject {
         persist()
     }
 
-    private func persist() {
+    private func persist() { _ = saveFeeds(feeds) }
+
+    @discardableResult
+    private func saveFeeds(_ updated: [StoredFeed]) -> Bool {
         do {
-            try store.save(feeds)
+            try store.save(updated)
+            feeds = updated
             libraryError = nil
+            return true
         } catch {
             libraryError = "无法保存本地订阅，请检查设备存储空间。"
+            return false
         }
     }
 
@@ -1554,6 +1694,7 @@ private struct LibraryView: View {
                 if let summary = feed.summary, !summary.isEmpty {
                     Text(summary).font(.subheadline).foregroundStyle(.secondary)
                 }
+                cacheControls(feed: feed)
                 episodeRows(feed: feed)
             }
             .navigationTitle(typeSize.isAccessibilitySize ? "单集" : feed.title)
@@ -1562,6 +1703,41 @@ private struct LibraryView: View {
             Text("选择一个订阅以查看单集")
                 .foregroundStyle(.secondary)
                 .navigationTitle("单集")
+        }
+    }
+
+    private func cacheControls(feed: StoredFeed) -> some View {
+        let busy = library.isRefreshingFeed(feed.id)
+        return Section("离线缓存") {
+            Picker("缓存策略", selection: Binding(
+                get: { feed.cachePolicy ?? FeedCachePolicy.none },
+                set: { library.setFeedCachePolicy($0, for: feed.id) }
+            )) {
+                Text("不缓存").tag(FeedCachePolicy.none)
+                Text("最新 5 集").tag(FeedCachePolicy.latestFive)
+                Text("最新 10 集").tag(FeedCachePolicy.latestTen)
+                Text("全部").tag(FeedCachePolicy.all)
+            }
+            .disabled(busy)
+            if busy {
+                Button("取消", role: .cancel) { library.cancelFeedRefresh(feed.id) }
+            } else {
+                Button((feed.cachePolicy ?? FeedCachePolicy.none) == .none ? "刷新订阅" : "刷新缓存") {
+                    library.refreshFeed(feed.id)
+                }
+            }
+            if let status = library.feedRefreshStatus[feed.id] {
+                switch status {
+                case .fetching:
+                    ProgressView("正在刷新订阅…")
+                case let .downloading(ready, total):
+                    ProgressView(value: Double(ready), total: Double(total)) {
+                        Text("已缓存 \(ready)/\(total) 集")
+                    }
+                case let .message(message):
+                    Text(message).font(.footnote).foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -2571,9 +2747,13 @@ private final class EpisodePlayback: ObservableObject {
         if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
     }
 
-    func play(_ episode: StoredEpisode) {
+    func play(_ episode: StoredEpisode, localURL: URL?) {
         reset()
         title = episode.title
+        if let localURL {
+            install(AVPlayerItem(url: localURL))
+            return
+        }
         guard let components = URLComponents(string: episode.audioUrl),
               (components.scheme?.lowercased() == "https" || components.scheme?.lowercased() == "http"), let host = components.host, !host.isEmpty,
               components.user == nil, components.password == nil, let url = components.url else {

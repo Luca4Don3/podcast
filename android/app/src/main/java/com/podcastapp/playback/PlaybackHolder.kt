@@ -15,6 +15,7 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import com.podcastapp.data.filemedia.FileMediaPlayback
 import com.podcastapp.data.filemedia.FileStreamFactory
 import com.podcastapp.data.feed.LocalPodcastLibrary
+import com.podcastapp.data.feed.OfflinePodcastCache
 import com.podcastapp.data.feed.SourceCredentials
 import com.podcastapp.data.feed.SourceTransport
 import com.podcastapp.data.remote.EpisodeDto
@@ -245,6 +246,7 @@ object PlaybackHolder {
             .build()
         checkpoint()
         clearStorageStream()
+        OfflinePodcastCache.get(context).clearPlaybackFiles()
         _queue.value = emptyList()
         _isLive.value = true
         _lastError.value = null
@@ -281,6 +283,7 @@ object PlaybackHolder {
         ensureServiceRunning(context)
         checkpoint()
         clearFilePlayback()
+        OfflinePodcastCache.get(context).clearPlaybackFiles()
         _queue.value = emptyList()
         _isLive.value = false
         _lastError.value = null
@@ -353,6 +356,7 @@ object PlaybackHolder {
         ensureServiceRunning(context)
         checkpoint()
         clearFilePlayback()
+        OfflinePodcastCache.get(context).clearPlaybackFiles()
         _queue.value = emptyList()
         _isLive.value = false
         _lastError.value = null
@@ -395,7 +399,12 @@ object PlaybackHolder {
             checkpoint()
             _queue.value = if (items.any { it.id == episode.id }) items else listOf(episode)
             val index = _queue.value.indexOfFirst { it.id == episode.id }
-            exo.setMediaItems(_queue.value.map { it.toMediaItem() }, index, 0L)
+            val feedById = LocalPodcastLibrary.get(context).feeds.value.associateBy { it.id }
+            val local = OfflinePodcastCache.get(context).selectPlaybackFiles(_queue.value) { feedById[it.podcastId] }
+            val mediaItems = _queue.value.mapIndexed { i, entry ->
+                entry.toMediaItem(local[i]?.let { Uri.fromFile(it).toString() } ?: entry.audioUrl)
+            }
+            exo.setMediaItems(mediaItems, index, 0L)
         }
         _nowPlaying.value = NowPlaying(episode = episode, podcastTitle = podcastTitle, artworkUrl = artworkUrl)
         exo.setPlaybackSpeed(podcastSpeed)
@@ -569,11 +578,12 @@ object PlaybackHolder {
         syncAtMs = null
         player?.release()
         player = null
+        appContext?.let { OfflinePodcastCache.get(it).clearPlaybackFiles() }
         _playback.value = PlaybackSnapshot()
     }
 }
 
-private fun EpisodeDto.toMediaItem(): MediaItem {
+private fun EpisodeDto.toMediaItem(playbackUrl: String): MediaItem {
     val metadata = MediaMetadata.Builder()
         .setTitle(title)
         .setArtist(podcastId)
@@ -581,7 +591,7 @@ private fun EpisodeDto.toMediaItem(): MediaItem {
         .build()
     return MediaItem.Builder()
         .setMediaId(id)
-        .setUri(audioUrl)
+        .setUri(playbackUrl)
         .setMediaMetadata(metadata)
         .build()
 }

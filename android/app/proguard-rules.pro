@@ -17,3 +17,8 @@
 -keep,allowoptimization class com.podcastapp.data.NativeSourceLines {
     private native int[] scanNative(java.lang.String);
 }
+
+# Offline cache JNI methods are resolved by their original names.
+-keep,allowoptimization class com.podcastapp.data.feed.NativeOfflineCache {
+    private native <methods>;
+}
