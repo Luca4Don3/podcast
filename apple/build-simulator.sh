@@ -34,6 +34,7 @@ assert info['CFBundleSupportedPlatforms'] == ['iPhoneSimulator']
 assert info['CFBundleShortVersionString'] == sys.argv[2]
 assert info['CFBundleVersion'] == sys.argv[3]
 assert not info.get('UIRequiresFullScreen', False), 'iPad windows must be resizable'
+assert info.get('NSAppTransportSecurity', {}).get('NSAllowsArbitraryLoads') is True, 'HTTP podcast sources require ATS exception'
 assert 'UILaunchScreen' in info or 'UILaunchStoryboardName' in info, 'launch screen is required'
 phone_orientations = {
     'UIInterfaceOrientationPortrait',

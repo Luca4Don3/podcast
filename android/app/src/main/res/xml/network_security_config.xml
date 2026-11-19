@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
     <!--
-      自建服务常用 http（内网 / 无域名），这里放开明文；
-      生产建议只保留 https：把 cleartextTrafficPermitted 改为 false，
-      并用 <domain-config> 单独放行你的内网地址。
+      部分公开播客源只提供 http（内网 / 无域名），这里放开明文；
+      建议优先使用 https，用户可为单个来源开启“仅允许 HTTPS”以禁止 http。
     -->
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>

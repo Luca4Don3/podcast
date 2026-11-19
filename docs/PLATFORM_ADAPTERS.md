@@ -15,7 +15,7 @@
 
 ## 传输加密与摘要认证
 
-默认同时支持 http 与 https，建议优先使用 https；只有用户为某个来源勾选“仅允许 HTTPS”时才拒绝 http 地址与降级跳转。其它可选项包括：自定义 CA 证书（与系统证书合并校验，不关闭证书验证）、mTLS 客户端证书与私钥、HTTP Digest 挑战认证。Digest 只在服务端返回 401 挑战后计算 Authorization，不预发明文密码。证书私钥与摘要凭据同样只进本机的加密存储；跨主机、端口变化或 HTTPS 降级时剥离认证与客户端证书。
+默认同时支持 http 与 https，建议优先使用 https；只有用户为某个来源勾选“仅允许 HTTPS”时才拒绝 http 地址与降级跳转。Android 的 Cleartext 策略与 Apple 的 ATS 已允许 HTTP，因此 HTTP 源在两端都可使用；对安全性要求高的来源请自行开启“仅允许 HTTPS”。其它可选项包括：自定义 CA 证书（与系统证书合并校验，不关闭证书验证）、mTLS 客户端证书与私钥、HTTP Digest 挑战认证。Digest 只在服务端返回 401 挑战后计算 Authorization，不预发明文密码。证书私钥与摘要凭据同样只进本机的加密存储；跨主机、端口变化或 HTTPS 降级时剥离认证与客户端证书。
 
 Apple 的 iOS mTLS 需要在“客户端证书”字段填入证书与密钥打包后的 PKCS#12 Base64，并填写其密码；macOS 支持证书 PEM + 私钥 PEM。真机路径仍需在 iOS SDK/Xcode 环境验证。OAuth、设备码和音频内容本身加密尚未实现，不声称支持。
 
