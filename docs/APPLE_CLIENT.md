@@ -18,7 +18,13 @@
 
 [iPhone／iPad 模拟器 CI](<https://github.com/Luca4Don3/podcast/actions/runs/44430683923>) 已通过两种设备的安装、启动，以及 10 项 API 单测。尚未进行签名真机验收。
 
-## iPad 布局验收
+## 多屏布局验收
+
+对照 Apple 的[布局](<https://developer.apple.com/design/human-interface-guidelines/layout>)、[Dynamic Type](<https://developer.apple.com/design/human-interface-guidelines/typography#Supporting-Dynamic-Type>)和[无障碍](<https://developer.apple.com/design/human-interface-guidelines/accessibility>)指南。界面使用系统安全区和当前窗口尺寸类别，不按物理屏幕宽度决定导航。iPhone 声明竖屏和左右横屏，iPad 声明四方向并允许调整窗口大小。
+
+- 小屏或短窗口：确认软键盘弹出时表单仍能滚动，底部播放器不会遮挡列表；点击底栏标题可查看完整、可滚动的播放器。
+- 标准字号和最大辅助字号：检查输入标签、长标题和播放控制。用 VoiceOver 检查字段、按钮和进度读数。
+- iPad 窄分屏和宽窗口：检查导航返回、窗口调整及横竖屏切换，确认选择与播放状态保留。多型号的自动安装／启动不能替代这些交互检查。
 
 使用专用测试账号，准备至少一个有可定位 HTTPS 单集的订阅。以下为交互验收步骤，不等同于 CI 的启动测试：
 

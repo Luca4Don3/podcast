@@ -33,11 +33,16 @@ assert sorted(info['UIDeviceFamily']) == [1, 2], 'iPhone and iPad must both be s
 assert info['CFBundleSupportedPlatforms'] == ['iPhoneSimulator']
 assert info['CFBundleShortVersionString'] == sys.argv[2]
 assert info['CFBundleVersion'] == sys.argv[3]
-assert not info.get('UIRequiresFullScreen', False)
-assert set(info['UISupportedInterfaceOrientations~ipad']) == {
-    'UIInterfaceOrientationPortrait', 'UIInterfaceOrientationPortraitUpsideDown',
+assert not info.get('UIRequiresFullScreen', False), 'iPad windows must be resizable'
+assert 'UILaunchScreen' in info or 'UILaunchStoryboardName' in info, 'launch screen is required'
+phone_orientations = {
+    'UIInterfaceOrientationPortrait',
     'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight',
 }
-print('Verified universal Apple simulator metadata and iPad orientations')
+assert set(info['UISupportedInterfaceOrientations~iphone']) == phone_orientations
+assert set(info['UISupportedInterfaceOrientations~ipad']) == (
+    phone_orientations | {'UIInterfaceOrientationPortraitUpsideDown'}
+)
+print('Verified universal launch screen, iPhone orientations and resizable iPad metadata')
 PY
 /usr/bin/ditto -c -k --keepParent "$app" "$work/podcast-$version-ios-simulator.zip"

@@ -186,15 +186,24 @@ private struct SignInView: View {
         NavigationStack {
             Form {
                 Section("服务器与账号") {
-                    TextField("HTTPS 服务器地址", text: $server, prompt: Text("https://podcast.example.com"))
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    TextField("邮箱", text: $email)
-                        .keyboardType(.emailAddress)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    SecureField("密码", text: $password)
+                    inputRow("HTTPS 服务器地址") {
+                        TextField("HTTPS 服务器地址", text: $server, prompt: Text("https://podcast.example.com"))
+                            .keyboardType(.URL)
+                            .textContentType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    inputRow("邮箱") {
+                        TextField("邮箱", text: $email, prompt: Text("name@example.com"))
+                            .keyboardType(.emailAddress)
+                            .textContentType(.username)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    inputRow("密码") {
+                        SecureField("密码", text: $password)
+                            .textContentType(.password)
+                    }
                 }
                 .disabled(library.signingIn)
                 Section {
@@ -217,7 +226,21 @@ private struct SignInView: View {
                     Text("密码不保存，访问令牌仅驻留本次登录的内存。到期需重新登录；注销仅退出本机，不撤销服务器令牌。")
                 }
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Podcast")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
+    private func inputRow<Field: View>(_ title: LocalizedStringKey, @ViewBuilder field: () -> Field) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityHidden(true) // The native text field already announces this label.
+            field()
+                .labelsHidden()
+                .frame(minHeight: 44)
         }
     }
 
@@ -232,6 +255,7 @@ private struct SignInView: View {
 @MainActor
 private struct LibraryView: View {
     @ObservedObject var library: LibrarySession
+    @Environment(\.dynamicTypeSize) private var typeSize
     let accountID: UUID
 
     private var selection: Binding<String?> {
@@ -276,6 +300,7 @@ private struct LibraryView: View {
                             Text(podcast.author).font(.subheadline).foregroundStyle(.secondary)
                         }
                     }
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -284,10 +309,18 @@ private struct LibraryView: View {
     @ViewBuilder
     private var detail: some View {
         if let podcast = library.selectedPodcast {
-            List { episodeRows(podcastID: podcast.id) }
-                .navigationTitle(podcast.title)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar { signOutButton }
+            List {
+                if typeSize.isAccessibilitySize {
+                    Text(podcast.title)
+                        .font(.title2.bold())
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.isHeader)
+                }
+                episodeRows(podcastID: podcast.id)
+            }
+            .navigationTitle(typeSize.isAccessibilitySize ? "单集" : podcast.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { signOutButton }
         } else {
             Text("选择一个订阅以查看单集")
                 .foregroundStyle(.secondary)
@@ -308,7 +341,11 @@ private struct LibraryView: View {
                 Button {
                     library.play(episodeID: episode.id, podcastID: podcastID, accountID: accountID)
                 } label: {
-                    Label(episode.title, systemImage: "play.circle")
+                    Label {
+                        Text(episode.title).fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "play.circle")
+                    }
                 }
                 .disabled(episode.audioUrl.isEmpty)
             }
@@ -512,39 +549,111 @@ private final class EpisodePlayback: ObservableObject {
 @MainActor
 private struct PlaybackBar: View {
     @ObservedObject var playback: EpisodePlayback
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.verticalSizeClass) private var heightClass
+    @State private var showingPlayer = false
+
+    private var compact: Bool { heightClass == .compact || typeSize.isAccessibilitySize }
 
     var body: some View {
         if let title = playback.title {
             controls(title: title, itemID: playback.itemID)
                 .id(playback.itemID)
+                .sheet(isPresented: $showingPlayer) {
+                    if let currentTitle = playback.title {
+                        PlayerSheet(playback: playback, title: currentTitle, itemID: playback.itemID)
+                    }
+                }
+                .onChange(of: playback.itemID) { _ in showingPlayer = false }
         }
     }
 
     private func controls(title: String, itemID: UUID) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                VStack(alignment: .leading) {
-                    Text(title).font(.headline).lineLimit(2)
-                    Text(playback.status).font(.footnote).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Button {
+                    showingPlayer = true
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title).font(.headline).lineLimit(compact ? 1 : 2)
+                        if !compact {
+                            Text(playback.status)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                Spacer(minLength: 8)
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(title))
+                .accessibilityHint(Text("打开播放器以查看完整标题和进度"))
+
                 if playback.canPlay {
                     Button {
                         playback.toggle(id: itemID)
                     } label: {
                         Image(systemName: playback.wantsPlayback ? "pause.fill" : "play.fill")
+                            .font(.title3)
                             .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                     }
                     .accessibilityLabel(playback.wantsPlayback ? Text("暂停") : Text("播放"))
                 }
             }
-            if let range = playback.seekRange {
+            if !compact, let range = playback.seekRange {
                 SeekSlider(playback: playback, itemID: itemID, range: range)
             }
         }
         .padding(.horizontal)
         .padding(.vertical, 6)
         .background(.regularMaterial)
+    }
+}
+
+@MainActor
+private struct PlayerSheet: View {
+    @ObservedObject var playback: EpisodePlayback
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let itemID: UUID
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text(title)
+                        .font(.title2.bold())
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.isHeader)
+                    Text(playback.status).foregroundStyle(.secondary)
+                    if playback.canPlay {
+                        Button {
+                            playback.toggle(id: itemID)
+                        } label: {
+                            Label(playback.wantsPlayback ? "暂停" : "播放",
+                                  systemImage: playback.wantsPlayback ? "pause.fill" : "play.fill")
+                                .frame(minHeight: 44)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    if let range = playback.seekRange {
+                        SeekSlider(playback: playback, itemID: itemID, range: range)
+                    }
+                }
+                .frame(maxWidth: 620, alignment: .leading)
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .center)
+            }
+            .navigationTitle("正在播放")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
     }
 }
 
