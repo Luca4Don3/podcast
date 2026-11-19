@@ -1,4 +1,5 @@
 #include "local_store.h"
+#include <windows.h>
 #include <cstdio>
 
 static int failures = 0;
