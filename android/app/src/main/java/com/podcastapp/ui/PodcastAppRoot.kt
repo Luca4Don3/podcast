@@ -1,5 +1,6 @@
 package com.podcastapp.ui
 
+import android.app.Activity
 import androidx.compose.foundation.layout.Box
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Row
@@ -91,7 +92,11 @@ private val tabs = listOf(
 
 /** 登录前也可打开服务器设置；等待本地会话加载后再显示页面。 */
 @Composable
-internal fun PodcastAppRoot(folds: List<FoldFeature> = emptyList(), appViewModel: AppViewModel = viewModel()) {
+internal fun PodcastAppRoot(
+    activity: Activity? = null,
+    folds: List<FoldFeature> = emptyList(),
+    appViewModel: AppViewModel = viewModel(),
+) {
     val session by appViewModel.session.collectAsState()
     val toast by appViewModel.toast.collectAsState()
     val busy by appViewModel.busy.collectAsState()
@@ -104,7 +109,7 @@ internal fun PodcastAppRoot(folds: List<FoldFeature> = emptyList(), appViewModel
         }
     }
 
-    AdaptiveWindow(folds) { profile ->
+    AdaptiveWindow(activity, folds) { profile ->
         val current = session
         if (current != null && current.isLoggedIn) {
             key(current.baseUrl, current.userId, current.loginId) {
@@ -178,7 +183,8 @@ private fun MainShell(
     }
     val rail = primary.navigation == NavigationMode.RAIL
     val narrow = primary.size == ScreenSize.NARROW_TALL || primary.widthDp < 360f
-    val playerInMainPane = profile.avoidsFold && secondary == null && showPlayer
+    val constrainPlayer = profile.avoidsFold || profile.usesModelCutout
+    val playerInMainPane = constrainPlayer && secondary == null && showPlayer
     val player: @Composable (() -> Unit) -> Unit = { collapse ->
         PlayerSheet(
             state = playerState,
@@ -337,7 +343,7 @@ private fun MainShell(
         }
     })
 
-    if (showPlayer && !profile.avoidsFold && secondary == null) {
+    if (showPlayer && !constrainPlayer && secondary == null) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(onDismissRequest = { showPlayer = false }, sheetState = sheetState) {
             player { scope.launch { sheetState.hide() }.invokeOnCompletion { showPlayer = false } }

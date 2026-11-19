@@ -44,7 +44,10 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             PodcastAppTheme {
-                PodcastAppRoot(folds = rememberFoldingFeatures(this@MainActivity))
+                PodcastAppRoot(
+                    activity = this@MainActivity,
+                    folds = rememberFoldingFeatures(this@MainActivity),
+                )
             }
         }
     }

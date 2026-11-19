@@ -38,6 +38,7 @@ data class ScreenProfile(
     val split: ScreenSplit?,
     /** A fold intersects the safe window, even if it could not provide a supported split. */
     val avoidsFold: Boolean,
+    val usesModelCutout: Boolean = false,
 )
 
 private const val NARROW_WIDTH_DP = 400f
