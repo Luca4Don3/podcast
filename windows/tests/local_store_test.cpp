@@ -7,7 +7,10 @@ static int failures = 0;
 int main() {
     using namespace podcast;
     LocalStore store;
-    store.set_path_for_test(L"podcast-store-test.dat");
+    wchar_t temp[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, temp);
+    const std::wstring test_path = std::wstring(temp) + L"podcast-store-test.dat";
+    store.set_path_for_test(test_path);
     Feed feed; feed.id = "f1"; feed.url = "https://a.test/feed.xml"; feed.title = "My Show";
     store.addOrUpdateFeed(feed);
     Episode e; e.id = "e1"; e.feed_id = "f1"; e.title = "Hello"; e.audio_url = "https://a.test/a.mp3"; e.published_at = 123;
@@ -15,7 +18,7 @@ int main() {
     store.setProgress("e1", 5000, false);
     store.setQueue({"e1", "e2"});
     CHECK(store.save());
-    LocalStore loaded; loaded.set_path_for_test(L"podcast-store-test.dat");
+    LocalStore loaded; loaded.set_path_for_test(test_path);
     CHECK(loaded.load());
     CHECK(loaded.feeds().size() == 1 && loaded.feeds()[0].title == "My Show");
     CHECK(loaded.episodes().size() == 1 && loaded.episodes()[0].audio_url == "https://a.test/a.mp3");

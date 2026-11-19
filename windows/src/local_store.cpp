@@ -87,8 +87,10 @@ bool LocalStore::load() {
 bool LocalStore::save() const {
     std::wstring directory = path_;
     const std::size_t slash = directory.find_last_of(L"\\/");
-    if (slash != std::wstring::npos) directory.resize(slash);
-    CreateDirectoryW(directory.c_str(), nullptr);
+    if (slash != std::wstring::npos) {
+        directory.resize(slash);
+        if (!directory.empty()) CreateDirectoryW(directory.c_str(), nullptr);
+    }
     // Write to a sibling temp then replace atomically.
     const std::wstring tmp = path_ + L".tmp";
     {
