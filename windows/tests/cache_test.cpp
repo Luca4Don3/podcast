@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <cwchar>
 #include <string>
 
 static int failures = 0;

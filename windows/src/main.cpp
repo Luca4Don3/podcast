@@ -1,5 +1,7 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <cstdio>
+#include <cwchar>
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <string>
