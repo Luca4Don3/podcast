@@ -77,8 +77,9 @@ int wmain() {
     wchar_t temp[MAX_PATH];
     GetTempPathW(MAX_PATH, temp);
     // Unicode directory exercises the UTF-8 path conversion at the C ABI boundary.
-    std::wstring dir = unique_dir(std::wstring(temp) + L"\\podcast-中文-缓存");
-    CreateDirectoryW((std::wstring(temp) + L"\\podcast-中文-缓存").c_str(), nullptr);
+    const std::wstring parent = std::wstring(temp) + L"\\podcast-中文-缓存";
+    CreateDirectoryW(parent.c_str(), nullptr);
+    std::wstring dir = unique_dir(parent);
     const std::string a = std::string(64, 'a') + ".mp3";
     const std::string b = std::string(64, 'b') + ".m4a";
     const std::string part = a + ".part";
