@@ -564,18 +564,9 @@ internal final class WebDavSessionDelegate: NSObject, URLSessionDelegate, URLSes
     }
 
     private static func clientCredential(certPEM: String, keyPEM: String, password: String) -> URLCredential? {
-#if os(macOS)
-        guard !certPEM.isEmpty, !keyPEM.isEmpty,
-              let certificate = certificates(from: certPEM).first else { return nil }
-        var parameters = SecItemImportExportKeyParameters(version: UInt32(0), flags: [],
-            passphrase: password.isEmpty ? nil : Unmanaged.passUnretained(password as CFString),
-            alertTitle: nil, alertPrompt: nil, accessRef: nil, keyUsage: nil, keyAttributes: nil)
-        var imported: CFArray?
-        let status = SecItemImport(Data(keyPEM.utf8) as CFData, nil, nil, nil, [], &parameters, nil, &imported)
-        guard status == errSecSuccess, let keys = imported as? [SecKey], let privateKey = keys.first,
-              let identity = SecIdentityCreate(nil, certificate, privateKey) else { return nil }
-        return URLCredential(identity: identity, certificates: nil, persistence: .forSession)
-#else
+        // iOS and macOS test runners do not expose SecIdentityCreate consistently.
+        // A PKCS#12 bundle (certificate + encrypted key) is the portable path.
+        _ = keyPEM
         let trimmed = certPEM.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let p12 = Data(base64Encoded: trimmed), !p12.isEmpty else { return nil }
         let options: [String: Any] = [kSecImportExportPassphrase as String: password]
@@ -585,7 +576,6 @@ internal final class WebDavSessionDelegate: NSObject, URLSessionDelegate, URLSes
               let identityValue = imported.first?[kSecImportItemIdentity as String] else { return nil }
         let identity = identityValue as! SecIdentity
         return URLCredential(identity: identity, certificates: nil, persistence: .forSession)
-#endif
     }
 #endif
 }
