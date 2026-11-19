@@ -18,7 +18,7 @@ set(cache_dir "${CMAKE_CURRENT_SOURCE_DIR}/../apple/NativeCache")
 add_library(podcast_cache STATIC "${cache_dir}/PodcastNativeCache.cpp")
 target_include_directories(podcast_cache PUBLIC "${cache_dir}/include")
 
-add_executable(podcast WIN32 src/main.cpp podcast.manifest)
+add_executable(podcast WIN32 src/main.cpp podcast.manifest.xml)
 target_link_libraries(podcast PRIVATE podcast_cache windowsapp ole32 shell32 comctl32 comdlg32 user32 gdi32)
 
 include(CTest)
