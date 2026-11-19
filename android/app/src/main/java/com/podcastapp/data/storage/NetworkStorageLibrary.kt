@@ -28,7 +28,7 @@ private val CREDENTIAL_QUERY_KEYS = setOf("token", "api_key", "key")
 
 /** 网络存储来源类型。极空间只保存用户自己填写的已开启 WebDAV 的地址。 */
 @Serializable
-enum class StorageProvider { WEBDAV, JIANGUOYUN, ZSPACE }
+enum class StorageProvider { WEBDAV, JIANGUOYUN, ZSPACE, FEILIAN }
 
 /**
  * 可持久化的来源元数据：这里只有非敏感字段，凭据/传输材料一律不进入本对象与落盘 JSON。

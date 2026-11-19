@@ -50,6 +50,7 @@ public enum WebDavProvider: String, Codable, Sendable {
     case webdav
     case jianguoyun
     case zspace
+    case feilian
 }
 
 /// Fixed, localized errors. Server-controlled strings are never echoed.
@@ -77,6 +78,11 @@ public enum WebDavError: LocalizedError, Equatable, Sendable {
         case .externalEntityForbidden: return "WebDAV 响应包含不允许的 XML 实体声明。"
         }
     }
+}
+
+/// Result for the configured endpoint over the system's current route, not a VPN status.
+public enum WebDavConnectionCheck: Equatable, Sendable {
+    case ready, authenticationRequired, forbidden, redirect, notWebDav, badResponse
 }
 
 // MARK: - URL hardening
@@ -438,7 +444,10 @@ internal final class WebDavSessionDelegate: NSObject, URLSessionDelegate, URLSes
     private let customAnchors: [SecCertificate]
 #endif
 
-    init(transport: SourceTransport, credentials: SourceCredentials, originalURL: URL?) {
+    private let followRedirects: Bool
+
+    init(transport: SourceTransport, credentials: SourceCredentials, originalURL: URL?, followRedirects: Bool) {
+        self.followRedirects = followRedirects
         self.transport = transport
         self.credentials = credentials
         self.originalURL = originalURL
@@ -458,7 +467,7 @@ internal final class WebDavSessionDelegate: NSObject, URLSessionDelegate, URLSes
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
-        guard let target = request.url,
+        guard followRedirects, let target = request.url,
               WebDavURLPolicy.isSafeRedirectTarget(target, from: task.originalRequest?.url,
                                                    transport: transport) else {
             completionHandler(nil)
@@ -582,7 +591,7 @@ internal final class WebDavSessionDelegate: NSObject, URLSessionDelegate, URLSes
 
 internal enum WebDavHTTP {
     static func makeSession(transport: SourceTransport, credentials: SourceCredentials,
-                            originalURL: URL) -> URLSession {
+                            originalURL: URL, followRedirects: Bool = true) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
@@ -590,7 +599,7 @@ internal enum WebDavHTTP {
         configuration.urlCredentialStorage = nil
         return URLSession(configuration: configuration,
                           delegate: WebDavSessionDelegate(transport: transport, credentials: credentials,
-                                                          originalURL: originalURL),
+                                                          originalURL: originalURL, followRedirects: followRedirects),
                           delegateQueue: nil)
     }
 }
@@ -623,13 +632,16 @@ public final class WebDavClient {
     private let transport: SourceTransport
     private let configurationError: WebDavError?
     private let sender: Sender
+    private let probeSender: Sender
 
     public convenience init(baseURL: URL, credentials: SourceCredentials, transport: SourceTransport) {
         self.init(baseURL: baseURL, credentials: credentials, transport: transport,
-                  sender: Self.defaultSender(transport: transport, credentials: credentials))
+                  sender: Self.defaultSender(transport: transport, credentials: credentials),
+                  probeSender: Self.defaultSender(transport: transport, credentials: credentials, probe: true))
     }
 
-    internal init(baseURL: URL, credentials: SourceCredentials, transport: SourceTransport, sender: @escaping Sender) {
+    internal init(baseURL: URL, credentials: SourceCredentials, transport: SourceTransport,
+                  sender: @escaping Sender, probeSender: Sender? = nil) {
         let resolved: Result<Configuration, WebDavError>
         do {
             resolved = .success(try Configuration(baseURL: baseURL))
@@ -652,6 +664,7 @@ public final class WebDavClient {
         self.credentials = credentials
         self.transport = transport
         self.sender = sender
+        self.probeSender = probeSender ?? sender
     }
 
     /// PROPFIND Depth:1. Returns direct children of `path` (empty path = root).
@@ -675,6 +688,33 @@ public final class WebDavClient {
         }
         return try WebDavXMLParser.parse(data, requestSegments: requestSegments,
                                         prefixSegments: prefixSegments)
+    }
+
+    /// Probe only the configured collection. Never follows a browser sign-in redirect.
+    public func testConnection(path: String = "") async throws -> WebDavConnectionCheck {
+        if let configurationError { throw configurationError }
+        guard transport.allows(origin) else { throw WebDavError.httpsRequired }
+        let segments = prefixSegments + (try WebDavURLPolicy.relativeSegments(path))
+        let url = try WebDavURLPolicy.append(segments, to: origin, trailingSlash: true)
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+        request.httpMethod = "PROPFIND"
+        request.httpShouldHandleCookies = false
+        request.setValue("0", forHTTPHeaderField: "Depth")
+        request.setValue("application/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data(Self.propfindBody.utf8)
+        applyCredentials(to: &request)
+        let (data, response) = try await probeSender(request)
+        switch response.statusCode {
+        case 401, 407: return .authenticationRequired
+        case 403: return .forbidden
+        case 300...399: return .redirect
+        case 404, 405, 501: return .notWebDav
+        case 200, 207:
+            guard (try? WebDavXMLParser.parse(data, requestSegments: segments,
+                                             prefixSegments: prefixSegments)) != nil else { return .notWebDav }
+            return .ready
+        default: return .badResponse
+        }
     }
 
     /// A credential-free http(s) URL for the given path. Never embeds userinfo or tokens.
@@ -717,13 +757,28 @@ public final class WebDavClient {
     <propfind xmlns="DAV:"><prop><href/><resourcetype/><getcontentlength/><getlastmodified/><getcontenttype/><displayname/></prop></propfind>
     """
 
-    private static func defaultSender(transport: SourceTransport, credentials: SourceCredentials) -> Sender {
+    private static func defaultSender(transport: SourceTransport, credentials: SourceCredentials,
+                                      probe: Bool = false) -> Sender {
         { request in
             guard let url = request.url else { throw WebDavError.requestFailed }
             guard transport.allows(url), WebDavURLPolicy.isSafeHTTPURL(url) else { throw WebDavError.httpsRequired }
-            let session = WebDavHTTP.makeSession(transport: transport, credentials: credentials, originalURL: url)
-            defer { session.finishTasksAndInvalidate() }
+            let session = WebDavHTTP.makeSession(transport: transport, credentials: credentials,
+                                                 originalURL: url, followRedirects: !probe)
+            defer { session.invalidateAndCancel() }
             do {
+#if !canImport(FoundationNetworking)
+                if probe {
+                    let (bytes, response) = try await session.bytes(for: request)
+                    guard let http = response as? HTTPURLResponse else { throw WebDavError.malformedResponse }
+                    guard http.statusCode == 200 || http.statusCode == 207 else { return (Data(), http) }
+                    var data = Data()
+                    for try await byte in bytes {
+                        guard data.count < 128 * 1024 else { throw WebDavError.tooLarge }
+                        data.append(byte)
+                    }
+                    return (data, http)
+                }
+#endif
                 let (data, response) = try await session.data(for: request)
                 guard let http = response as? HTTPURLResponse else { throw WebDavError.malformedResponse }
                 return (data, http)

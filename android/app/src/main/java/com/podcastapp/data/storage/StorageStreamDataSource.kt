@@ -37,6 +37,11 @@ private val CREDENTIAL_QUERY_KEYS = setOf("token", "api_key", "key", "password",
 /** 最终响应和它所属的 Call；关闭流时必须一起释放。 */
 internal data class StorageStreamResult(val call: Call, val response: Response)
 
+@OptIn(UnstableApi::class)
+internal interface StoragePlaybackFactory : DataSource.Factory {
+    fun cancel()
+}
+
 /**
  * 网络存储音频的 DataSource.Factory。
  *
@@ -50,16 +55,16 @@ internal class StorageStreamFactory(
     private val mediaUri: Uri,
     private val credentials: SourceCredentials,
     private val transport: SourceTransport,
-) : DataSource.Factory {
+) : StoragePlaybackFactory {
     private val url: HttpUrl = validateMediaUrl(mediaUrl, transport)
     private var invalidated = false
     private val calls = mutableSetOf<Call>()
 
-    override fun createDataSource(): DataSource = StorageStreamDataSource(this, mediaUri)
+    override fun createDataSource(): DataSource = StorageStreamDataSource(mediaUri, ::openResponse, ::forget)
 
     /** 退出或切换音源时调用：后续请求直接失败，正在进行的请求立刻中断。 */
     @Synchronized
-    fun cancel() {
+    override fun cancel() {
         invalidated = true
         calls.forEach { it.cancel() }
         calls.clear()
@@ -186,9 +191,11 @@ private fun credentialsForHop(current: String, next: String, creds: SourceCreden
 }
 
 @OptIn(UnstableApi::class)
-private class StorageStreamDataSource(
-    private val factory: StorageStreamFactory,
+internal class StorageStreamDataSource(
     private val mediaUri: Uri,
+    private val openResponse: (Long, Long) -> StorageStreamResult,
+    private val forget: (Call) -> Unit,
+    private val exposeResponseHeaders: Boolean = true,
 ) : BaseDataSource(true) {
     private var call: Call? = null
     private var response: Response? = null
@@ -203,7 +210,7 @@ private class StorageStreamDataSource(
         }
         transferInitializing(dataSpec)
         try {
-            val stream = factory.openResponse(dataSpec.position, dataSpec.length)
+            val stream = openResponse(dataSpec.position, dataSpec.length)
             call = stream.call
             val result = stream.response.also { response = it }
             val contentRange = result.header("Content-Range")
@@ -254,7 +261,8 @@ private class StorageStreamDataSource(
 
     override fun getUri(): Uri? = mediaUri.takeIf { opened }
 
-    override fun getResponseHeaders(): Map<String, List<String>> = response?.headers?.toMultimap().orEmpty()
+    override fun getResponseHeaders(): Map<String, List<String>> =
+        if (exposeResponseHeaders) response?.headers?.toMultimap().orEmpty() else emptyMap()
 
     override fun close() {
         input = null
@@ -262,7 +270,7 @@ private class StorageStreamDataSource(
             response?.close()
         } finally {
             response = null
-            call?.let(factory::forget)
+            call?.let(forget)
             call = null
             if (opened) {
                 opened = false

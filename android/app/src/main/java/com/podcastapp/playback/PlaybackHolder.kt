@@ -19,6 +19,9 @@ import com.podcastapp.data.feed.SourceCredentials
 import com.podcastapp.data.feed.SourceTransport
 import com.podcastapp.data.remote.EpisodeDto
 import com.podcastapp.data.remote.StationDto
+import com.podcastapp.data.storage.OneDriveDownloads
+import com.podcastapp.data.storage.OneDrivePlaybackFactory
+import com.podcastapp.data.storage.StoragePlaybackFactory
 import com.podcastapp.data.storage.StorageMedia
 import com.podcastapp.data.storage.StorageStreamFactory
 import kotlinx.coroutines.CoroutineScope
@@ -104,7 +107,7 @@ object PlaybackHolder {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var podcastSpeed = 1f
     private var fileStreamFactory: FileStreamFactory? = null
-    private var storageStreamFactory: StorageStreamFactory? = null
+    private var storageStreamFactory: StoragePlaybackFactory? = null
     private var ticker: Job? = null
     private var hasUi = false
     private var syncAtMs: Long? = null
@@ -298,17 +301,38 @@ object PlaybackHolder {
         credentials: SourceCredentials,
         transport: SourceTransport,
     ) {
+        playStorageStream(context, media.title, media.mime, "网络存储") { uri ->
+            StorageStreamFactory(media.url, uri, credentials, transport)
+        }
+    }
+
+    @OptIn(UnstableApi::class)
+    internal fun playOneDrive(context: Context, name: String, mime: String?, downloads: OneDriveDownloads) {
+        playStorageStream(context, name, mime, "OneDrive") { uri -> OneDrivePlaybackFactory(downloads, uri) }
+    }
+
+    internal fun stopOneDrive() {
+        if (storageStreamFactory !is OneDrivePlaybackFactory) return
+        player?.clearMediaItems()
+        clearFilePlayback()
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun playStorageStream(
+        context: Context, name: String, mime: String?, sourceName: String,
+        makeFactory: (Uri) -> StoragePlaybackFactory,
+    ) {
         init(context)
         val exo = player ?: return
         val itemId = STORAGE_MEDIA_PREFIX + UUID.randomUUID().toString()
         val mediaUri = Uri.parse(itemId)
-        val factory = StorageStreamFactory(media.url, mediaUri, credentials, transport)
-        val title = media.title.ifBlank { "未命名音源" }
+        val factory = makeFactory(mediaUri)
+        val title = name.ifBlank { "未命名音源" }
         val item = MediaItem.Builder()
             .setMediaId(itemId)
             .setUri(mediaUri)
-            .setMimeType(media.mime?.takeIf { it.isNotBlank() && it.startsWith("audio/", ignoreCase = true) })
-            .setMediaMetadata(MediaMetadata.Builder().setTitle(title).setArtist("网络存储")
+            .setMimeType(mime?.takeIf { it.isNotBlank() && it.startsWith("audio/", ignoreCase = true) })
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(title).setArtist(sourceName)
                 .setIsBrowsable(false).setIsPlayable(true).build())
             .build()
         val source = ProgressiveMediaSource.Factory(factory).createMediaSource(item)
@@ -322,7 +346,7 @@ object PlaybackHolder {
         exo.setPlaybackSpeed(podcastSpeed)
         exo.setMediaSource(source, 0L)
         storageStreamFactory = factory
-        _nowPlaying.value = NowPlaying(podcastTitle = "网络存储", file = NowPlayingFile(itemId, title))
+        _nowPlaying.value = NowPlaying(podcastTitle = sourceName, file = NowPlayingFile(itemId, title))
         exo.prepare()
         exo.play()
     }

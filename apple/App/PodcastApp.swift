@@ -497,6 +497,8 @@ private final class LibrarySession: ObservableObject {
     private let store = LocalFeedStore()
     private let storageStore = NetworkStorageStore()
     let playback = EpisodePlayback()
+    let oneDrive = OneDriveSession()
+    static let oneDriveSelection = "provider:onedrive"
 
     var selectedFeed: StoredFeed? {
         feeds.first { $0.id == selection }
@@ -522,6 +524,8 @@ private final class LibrarySession: ObservableObject {
                 let sourceID = String(itemID.dropFirst(Self.storageSelectionPrefix.count))
                 guard storageSources.contains(where: { $0.id == sourceID }) else { return }
                 storageSelection = sourceID
+            } else if itemID == Self.oneDriveSelection {
+                storageSelection = nil
             } else {
                 guard feeds.contains(where: { $0.id == itemID }) else { return }
                 storageSelection = nil
@@ -598,7 +602,7 @@ private final class LibrarySession: ObservableObject {
     }
 
     /// Strict validation: no userinfo, no query/fragment (no credentials in the stored URL).
-    private static func safeStorageBaseURL(_ raw: String, requireHttps: Bool) -> String? {
+    fileprivate static func safeStorageBaseURL(_ raw: String, requireHttps: Bool) -> String? {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let forbidden = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
         guard !value.isEmpty, value.rangeOfCharacter(from: forbidden) == nil,
@@ -619,7 +623,7 @@ private final class LibrarySession: ObservableObject {
         return components.url?.absoluteString
     }
 
-    private static func safeRootPath(_ raw: String) -> String? {
+    fileprivate static func safeRootPath(_ raw: String) -> String? {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.isEmpty || value == "/" { return "" }
         let forbidden = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
@@ -1216,22 +1220,22 @@ private struct LibraryView: View {
 
     @ViewBuilder
     private var storageRows: some View {
-        if !library.storageSources.isEmpty {
-            Section("网络存储") {
-                ForEach(library.storageSources) { source in
-                    NavigationLink(value: "storage:" + source.id) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(source.label)
-                            Text(WebDavProvider(rawValue: source.provider) == .jianguoyun ? "坚果云 WebDAV" :
-                                 (WebDavProvider(rawValue: source.provider) == .zspace ? "极空间 WebDAV" : "WebDAV"))
-                                .font(.subheadline).foregroundStyle(.secondary)
-                        }
-                        .fixedSize(horizontal: false, vertical: true)
+        Section("网络存储") {
+            NavigationLink(value: LibrarySession.oneDriveSelection) {
+                Label("OneDrive", systemImage: "cloud")
+            }
+            ForEach(library.storageSources) { source in
+                NavigationLink(value: "storage:" + source.id) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(source.label)
+                        Text(source.webDavSource?.provider.displayName ?? "WebDAV")
+                            .font(.subheadline).foregroundStyle(.secondary)
                     }
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button(role: .destructive) { library.removeNetworkSource(source.id) } label: {
-                            Label("移除来源", systemImage: "trash")
-                        }
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button(role: .destructive) { library.removeNetworkSource(source.id) } label: {
+                        Label("移除来源", systemImage: "trash")
                     }
                 }
             }
@@ -1240,7 +1244,9 @@ private struct LibraryView: View {
 
     @ViewBuilder
     private var detail: some View {
-        if let sourceID = library.selectedStorageSourceID {
+        if library.selection == LibrarySession.oneDriveSelection {
+            OneDriveBrowserView(session: library.oneDrive, playback: library.playback)
+        } else if let sourceID = library.selectedStorageSourceID {
             StorageBrowserView(library: library, sourceID: sourceID)
         } else if let feed = library.selectedFeed {
             List {
@@ -1292,6 +1298,17 @@ private struct LibraryView: View {
     }
 }
 
+private extension WebDavProvider {
+    var displayName: String {
+        switch self {
+        case .webdav: return "WebDAV"
+        case .jianguoyun: return "坚果云 WebDAV"
+        case .zspace: return "极空间 WebDAV"
+        case .feilian: return "飞连企业网络（WebDAV）"
+        }
+    }
+}
+
 // MARK: - Add network storage
 
 @MainActor
@@ -1302,13 +1319,15 @@ private struct AddNetworkStorageView: View {
     @State private var label = ""
     @State private var baseURL = ""
     @State private var rootPath = ""
+    @State private var checkTask: Task<Void, Never>?
+    @State private var checkResult: String?
 
     // Same input-state shape as AddSourceView, feeding SourceCredentials / SourceTransport.
     @State private var authKind: CredentialKind = .basic
     @State private var username = ""
     @State private var secret = ""
     @State private var apiKeyHeader = ""
-    @State private var requireHttps = true
+    @State private var requireHttps = false
     @State private var useDigest = false
     @State private var caPEM = ""
     @State private var clientCertPEM = ""
@@ -1329,8 +1348,54 @@ private struct AddNetworkStorageView: View {
             authKind = .basic
         case .zspace:
             authKind = .basic
+        case .feilian:
+            baseURL = ""
+            username = ""
+            secret = ""
+            authKind = .none
         case .webdav:
             break
+        }
+        checkResult = nil
+    }
+
+    private func checkEnterpriseWebDav() {
+        guard checkTask == nil else { return }
+        focusedField = nil
+        let credentials = SourceCredentials(kind: authKind, username: username, secret: secret, header: apiKeyHeader)
+        let transport = SourceTransport(requireHttps: requireHttps, customCaPem: caPEM,
+                                        clientCertPem: clientCertPEM, clientKeyPem: clientKeyPEM,
+                                        clientKeyPassword: clientKeyPassword, digest: useDigest)
+        do { try transport.validate() } catch {
+            checkResult = "证书或传输设置无效。"
+            return
+        }
+        guard let base = LibrarySession.safeStorageBaseURL(baseURL, requireHttps: requireHttps),
+              let root = LibrarySession.safeRootPath(rootPath),
+              let url = storageClientBaseURL(for: StoredNetworkSource(id: "", provider: provider.rawValue,
+                                                                     label: "", baseUrl: base, rootPath: root)) else {
+            checkResult = "地址或根路径无效，请填写企业分配的 WebDAV 地址。"
+            return
+        }
+        checkResult = nil
+        checkTask = Task { @MainActor in
+            defer { checkTask = nil }
+            do {
+                let result = try await WebDavClient(baseURL: url, credentials: credentials, transport: transport).testConnection()
+                try Task.checkCancellation()
+                switch result {
+                case .ready: checkResult = "已收到有效 WebDAV 响应；这不是飞连登录状态。"
+                case .authenticationRequired: checkResult = "已到达服务，但需要该 WebDAV 来源自己的凭据。"
+                case .forbidden: checkResult = "已到达服务，但访问被拒绝，请核对企业策略和目录权限。"
+                case .redirect: checkResult = "服务要求跳转（可能是网页统一登录），请使用直连 WebDAV 地址。"
+                case .notWebDav: checkResult = "未收到有效 WebDAV 响应，请核对路径，不要填写网页登录页。"
+                case .badResponse: checkResult = "服务返回异常状态，请检查企业网关或 WebDAV 服务。"
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                checkResult = "无法完成连接，请检查飞连连接、分流、企业 DNS、证书和目标服务。"
+            }
         }
     }
 
@@ -1361,6 +1426,7 @@ private struct AddNetworkStorageView: View {
                         Text("通用 WebDAV").tag(WebDavProvider.webdav)
                         Text("坚果云").tag(WebDavProvider.jianguoyun)
                         Text("极空间").tag(WebDavProvider.zspace)
+                        Text(WebDavProvider.feilian.displayName).tag(WebDavProvider.feilian)
                     }
                     .onChange(of: provider) { newValue in applyProvider(newValue) }
                     switch provider {
@@ -1369,6 +1435,9 @@ private struct AddNetworkStorageView: View {
                             .font(.footnote).foregroundStyle(.secondary)
                     case .zspace:
                         Text("请先在自己的极空间 NAS 设置中开启 WebDAV 服务，再填写设备的实际 HTTPS 地址。本应用不使用任何私有 API。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    case .feilian:
+                        Text("先在飞连客户端完成企业登录，再填写管理员提供的内网 WebDAV 地址。本应用使用系统路由，不接受飞连密码或浏览器 SSO 页面。")
                             .font(.footnote).foregroundStyle(.secondary)
                     case .webdav:
                         Text("填写支持 WebDAV 的服务器地址；仅使用标准的 PROPFIND / GET 只读请求。")
@@ -1396,7 +1465,7 @@ private struct AddNetworkStorageView: View {
                             .focused($focusedField, equals: .rootPath)
                     }
                 }
-                .disabled(library.isFetching)
+                .disabled(library.isFetching || checkTask != nil)
                 Section("认证（可选）") {
                     Picker("认证方式", selection: $authKind) {
                         Text("无").tag(CredentialKind.none)
@@ -1447,7 +1516,7 @@ private struct AddNetworkStorageView: View {
                         }
                     }
                 }
-                .disabled(library.isFetching)
+                .disabled(library.isFetching || checkTask != nil)
                 Section("传输加密（可选）") {
                     Toggle("仅允许 HTTPS", isOn: $requireHttps)
                     Toggle("HTTP Digest 认证（401 挑战后再计算）", isOn: $useDigest)
@@ -1472,7 +1541,7 @@ private struct AddNetworkStorageView: View {
                             .focused($focusedField, equals: .clientKeyPassword)
                     }
                 }
-                .disabled(library.isFetching)
+                .disabled(library.isFetching || checkTask != nil)
                 Section {
                     if library.isFetching {
                         ProgressView("正在读取目录…")
@@ -1480,6 +1549,11 @@ private struct AddNetworkStorageView: View {
                         Button("添加网络存储", action: submit)
                             .disabled(label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
                                       baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    if provider == .feilian {
+                        Button(checkTask == nil ? "测试企业 WebDAV（不保存）" : "正在测试…", action: checkEnterpriseWebDav)
+                            .disabled(checkTask != nil || baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if let checkResult { Text("上次测试：" + checkResult).foregroundStyle(.secondary) }
                     }
                     if let message = library.addError {
                         Text(message).foregroundStyle(.secondary)
@@ -1500,6 +1574,7 @@ private struct AddNetworkStorageView: View {
                 }
             }
             .navigationTitle("网络存储")
+            .onDisappear { checkTask?.cancel() }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -1829,6 +1904,7 @@ private final class EpisodePlayback: ObservableObject {
     private var routeObserver: NSObjectProtocol?
     private var interruptionObserver: NSObjectProtocol?
     private var storageLoader: StorageResourceLoader?
+    private var isOneDriveItem = false
     private var shouldResumeAfterInterruption = false
     private var audioSessionActive = false
 
@@ -1887,6 +1963,18 @@ private final class EpisodePlayback: ObservableObject {
         // AVAssetResourceLoader.delegate is weak; keep the loader alive for this item.
         storageLoader = loader
         install(AVPlayerItem(asset: asset))
+    }
+
+    /// The signed URL lives only in the active player item; no bearer headers are attached.
+    func playOneDrive(url: URL, title: String) {
+        reset()
+        self.title = title
+        isOneDriveItem = true
+        install(AVPlayerItem(url: url))
+    }
+
+    func stopOneDrive() {
+        if isOneDriveItem { reset() }
     }
 
     private func install(_ item: AVPlayerItem) {
@@ -1961,6 +2049,7 @@ private final class EpisodePlayback: ObservableObject {
         player.currentItem?.cancelPendingSeeks()
         player.replaceCurrentItem(with: nil)
         storageLoader = nil
+        isOneDriveItem = false
         deactivateAudioSession()
         title = nil
         status = ""
@@ -2250,5 +2339,226 @@ private struct SeekSlider: View {
             Text("播放进度")
         }
         .accessibilityValue(Text(Duration.seconds(displayedPosition).formatted(.time(pattern: .minuteSecond))))
+    }
+}
+
+// MARK: - OneDrive (session-only OAuth and Graph browser)
+
+@MainActor
+private final class OneDriveSession: ObservableObject {
+    enum State { case disconnected, requesting, waiting(OneDriveDeviceCode), connected }
+    @Published private(set) var state = State.disconnected
+    @Published private(set) var folders: [OneDriveItem] = []
+    @Published private(set) var entries: [OneDriveItem] = []
+    @Published private(set) var next: OneDrivePage.Cursor?
+    @Published private(set) var isBusy = false
+    @Published private(set) var error: OneDriveError?
+
+    private var client: OneDriveClient?
+    private var request: Task<Void, Never>?
+    private var loaded = false
+
+    func connect(clientID: String, playback: EpisodePlayback) {
+        guard case .disconnected = state else { return }
+        do {
+            let service = try OneDriveClient(clientID: clientID)
+            client = service
+            state = .requesting
+            work(playback: playback) { [self] in
+                let code = try await service.startSignIn()
+                try Task.checkCancellation()
+                state = .waiting(code)
+                try await service.finishSignIn(code)
+                try Task.checkCancellation()
+                state = .connected
+                try await load(using: service, folders: [])
+            }
+        } catch {
+            self.error = .invalidClientID
+        }
+    }
+
+    func disconnect(playback: EpisodePlayback) {
+        cancelRequest()
+        state = .disconnected
+        loaded = false
+        folders = []
+        entries = []
+        next = nil
+        error = nil
+        playback.stopOneDrive()
+        if let client { Task { await client.disconnect() } }
+        client = nil
+    }
+
+    func leaveBrowser(playback: EpisodePlayback) {
+        switch state {
+        case .requesting, .waiting: disconnect(playback: playback)
+        case .connected: cancelRequest()
+        case .disconnected: break
+        }
+    }
+
+    func loadIfNeeded(playback: EpisodePlayback) {
+        if !loaded { browse([], playback: playback) }
+    }
+
+    func browse(_ folders: [OneDriveItem], playback: EpisodePlayback) {
+        guard case .connected = state, let client, !isBusy else { return }
+        work(playback: playback) { [self] in try await load(using: client, folders: folders) }
+    }
+
+    func loadMore(playback: EpisodePlayback) {
+        guard case .connected = state, let client, let next, !isBusy else { return }
+        work(playback: playback) { [self] in
+            let page = try await client.list(after: next)
+            try Task.checkCancellation()
+            var seen = Set(entries.map(\.id))
+            entries += page.items.filter { ($0.isFolder || $0.isAudio) && seen.insert($0.id).inserted }
+            self.next = page.next == next ? nil : page.next
+        }
+    }
+
+    func play(_ item: OneDriveItem, playback: EpisodePlayback) {
+        guard case .connected = state, let client, !isBusy else { return }
+        let previousPlayback = playback.itemID
+        work(playback: playback) {
+            let url = try await client.playbackURL(for: item)
+            try Task.checkCancellation()
+            guard playback.itemID == previousPlayback else { return }
+            playback.playOneDrive(url: url, title: item.name)
+        }
+    }
+
+    private func load(using client: OneDriveClient, folders: [OneDriveItem]) async throws {
+        let page = try await client.list(folderID: folders.last?.id)
+        try Task.checkCancellation()
+        var seen = Set<String>()
+        entries = page.items.filter { ($0.isFolder || $0.isAudio) && seen.insert($0.id).inserted }
+        self.folders = folders
+        next = page.next
+        loaded = true
+    }
+
+    private func work(playback: EpisodePlayback, operation: @escaping @MainActor () async throws -> Void) {
+        isBusy = true
+        error = nil
+        request = Task { [self] in
+            do { try await operation() }
+            catch {
+                guard !Task.isCancelled else { return }
+                let failure = (error as? OneDriveError) ?? .network
+                switch state {
+                case .requesting, .waiting: disconnect(playback: playback)
+                case .connected where failure == .authorizationRequired: disconnect(playback: playback)
+                default: break
+                }
+                self.error = failure
+            }
+            guard !Task.isCancelled else { return }
+            request = nil
+            isBusy = false
+        }
+    }
+
+    private func cancelRequest() {
+        request?.cancel()
+        request = nil
+        isBusy = false
+    }
+}
+
+@MainActor
+private struct OneDriveBrowserView: View {
+    @ObservedObject var session: OneDriveSession
+    let playback: EpisodePlayback
+    @AppStorage("oneDrivePublicClientID") private var savedClientID = ""
+    @State private var clientID = ""
+
+    var body: some View {
+        List {
+            switch session.state {
+            case .disconnected:
+                Section {
+                    TextField("应用程序（客户端）ID", text: $clientID)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button("连接 OneDrive") {
+                        let value = clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if let id = UUID(uuidString: value) { savedClientID = id.uuidString.lowercased() }
+                        session.connect(clientID: value, playback: playback)
+                    }
+                } header: {
+                    Text("未连接")
+                } footer: {
+                    Text("填写 Microsoft Entra 的应用程序 ID。注册范围需支持所用账号（建议多租户 + 个人账户），开启公共客户端流，并配置 Microsoft Graph 委托权限 Files.Read。无需客户端密钥。")
+                }
+            case .requesting:
+                ProgressView("正在向 Microsoft 请求设备码…")
+                cancelButton
+            case .waiting(let code):
+                Section("等待 Microsoft 授权") {
+                    Text("打开 Microsoft 官方登录页并输入下方设备码，只批准你主动发起的请求。")
+                    Text(verbatim: code.userCode).font(.title2.monospaced()).textSelection(.enabled)
+                    Link("打开 Microsoft 设备登录", destination: code.verificationURL)
+                    Text("有效期至 \(code.expiresAt.formatted(date: .omitted, time: .standard))")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    cancelButton
+                }
+            case .connected:
+                connectedRows
+            }
+            if let error = session.error, let message = error.errorDescription {
+                Text(message).foregroundStyle(.secondary)
+            }
+            Section {
+                Text("OneDrive 仅只读访问。访问令牌和刷新令牌仅保留在本次 App 运行的内存中；退出 App 后需重新授权。音频下载地址不会保存。")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("OneDrive")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            clientID = savedClientID
+            session.loadIfNeeded(playback: playback)
+        }
+        .onDisappear { session.leaveBrowser(playback: playback) }
+    }
+
+    private var cancelButton: some View {
+        Button("取消授权") { session.disconnect(playback: playback) }
+    }
+
+    @ViewBuilder
+    private var connectedRows: some View {
+        Section("已连接 · 本次会话") {
+            Button("断开 OneDrive", role: .destructive) { session.disconnect(playback: playback) }
+        }
+        Section(session.folders.last?.name ?? "OneDrive 根目录") {
+            if !session.folders.isEmpty {
+                Button {
+                    session.browse(Array(session.folders.dropLast()), playback: playback)
+                } label: { Label("返回上级目录", systemImage: "arrow.up") }
+                .disabled(session.isBusy)
+            }
+            if session.isBusy {
+                ProgressView("正在读取 OneDrive…")
+            } else if session.entries.isEmpty, session.error == nil, session.next == nil {
+                Text("此处没有目录或可播放的音频。").foregroundStyle(.secondary)
+            }
+            ForEach(session.entries) { item in
+                Button {
+                    if item.isFolder { session.browse(session.folders + [item], playback: playback) }
+                    else { session.play(item, playback: playback) }
+                } label: {
+                    Label { Text(item.name) } icon: { Image(systemName: item.isFolder ? "folder" : "play.circle") }
+                }
+                .disabled(session.isBusy)
+            }
+            if session.next != nil {
+                Button("加载更多") { session.loadMore(playback: playback) }.disabled(session.isBusy)
+            }
+            Button("刷新目录") { session.browse(session.folders, playback: playback) }.disabled(session.isBusy)
+        }
     }
 }

@@ -40,6 +40,7 @@ import org.xml.sax.SAXParseException
 
 private const val MAX_ENTRIES = 500
 private const val MAX_XML_CHARS = 4 * 1024 * 1024
+private const val MAX_PROBE_BYTES = 128L * 1024
 private const val MAX_REDIRECTS = 5
 private const val USER_AGENT = "PodcastApp-WebDav/1.5"
 
@@ -62,6 +63,22 @@ data class WebDavEntry(
     val contentType: String? = null,
 )
 
+/** Unambiguous results for the user-configured enterprise WebDAV endpoint, not for the VPN itself. */
+enum class WebDavConnectionCheck {
+    READY, AUTH_REQUIRED, FORBIDDEN, REDIRECT, NOT_WEBDAV, BAD_RESPONSE;
+
+    companion object {
+        internal fun fromResponse(code: Int, body: String): WebDavConnectionCheck = when (code) {
+            401, 407 -> AUTH_REQUIRED
+            403 -> FORBIDDEN
+            in 300..399 -> REDIRECT
+            404, 405, 501 -> NOT_WEBDAV
+            200, 207 -> if (runCatching { parsePropFindXml(body) }.isSuccess) READY else NOT_WEBDAV
+            else -> BAD_RESPONSE
+        }
+    }
+}
+
 /**
  * 只读 WebDAV 客户端：PROPFIND 列目录、HEAD 取长度、GET 探测 Range。
  *
@@ -69,11 +86,15 @@ data class WebDavEntry(
  * 跨 host / 端口 / https 降级跳转时逐跳剥离。复用 data.feed 中的凭据/传输工具，
  * 不修改它们，也不发起任何非用户指定的网络请求。
  */
-class WebDavClient(
+class WebDavClient internal constructor(
     baseUrl: String,
     private val credentials: SourceCredentials,
     private val transport: SourceTransport,
+    private val makeClientBuilder: () -> OkHttpClient.Builder,
 ) {
+    constructor(baseUrl: String, credentials: SourceCredentials, transport: SourceTransport) :
+        this(baseUrl, credentials, transport, { OkHttpClient.Builder() })
+
     private val base: HttpUrl = validateBaseUrl(baseUrl, transport)
 
     /** 把（相对或绝对）路径拼到 base 的同一来源 URL；凭据不会出现在结果里。 */
@@ -100,6 +121,17 @@ class WebDavClient(
             throw IOException("PROPFIND 失败: HTTP ${response.code}")
         }
         parsePropFindXml(response.body, requestedPath)
+    }
+
+    /** No redirect or discovery. Verify the exact WebDAV collection through the current OS network. */
+    fun testConnection(path: String = ""): Result<WebDavConnectionCheck> = runCatching {
+        require(!path.contains('?') && !path.contains('#') && !path.contains('\\')) { "根路径无效" }
+        val directory = path.trim().trim('/').let { if (it.isEmpty()) it else "$it/" }
+        val target = resolveFileUrl(directory)
+        val body = PROPFIND_BODY.toRequestBody("application/xml; charset=utf-8".toMediaType())
+        val response = execute("PROPFIND", target, mapOf("Depth" to "0"), body,
+            readBody = true, followRedirects = false, maxResponseBytes = MAX_PROBE_BYTES)
+        WebDavConnectionCheck.fromResponse(response.code, response.body)
     }
 
     /**
@@ -134,6 +166,8 @@ class WebDavClient(
         headers: Map<String, String> = emptyMap(),
         body: RequestBody? = null,
         readBody: Boolean,
+        followRedirects: Boolean = true,
+        maxResponseBytes: Long = MAX_XML_CHARS.toLong(),
     ): RawResponse {
         var current = url
         var hopCredentials = credentials
@@ -150,7 +184,7 @@ class WebDavClient(
                 }
                 .build()
             buildClient(hopCredentials, hopTransport).newCall(request).execute().use { response ->
-                if (response.code in 300..399) {
+                if (followRedirects && response.code in 300..399) {
                     if (hop == MAX_REDIRECTS) throw IOException("跳转次数过多")
                     val location = response.header("Location")
                     if (location.isNullOrBlank()) throw IOException("跳转地址缺失")
@@ -159,7 +193,11 @@ class WebDavClient(
                     hopTransport = SourceTransportSecurity.transportForRedirect(current, next, hopTransport)
                     current = next
                 } else {
-                    val text = if (readBody) response.body?.string().orEmpty() else ""
+                    val text = if (readBody && response.code in 200..299) {
+                        val bounded = response.peekBody(maxResponseBytes + 1)
+                        if (bounded.contentLength() > maxResponseBytes) throw IOException("WebDAV 响应超过大小限制")
+                        bounded.string()
+                    } else ""
                     return RawResponse(response.code, response.headers, text)
                 }
             }
@@ -168,7 +206,7 @@ class WebDavClient(
     }
 
     private fun buildClient(creds: SourceCredentials, tr: SourceTransport): OkHttpClient {
-        val builder = OkHttpClient.Builder()
+        val builder = makeClientBuilder()
             .followRedirects(false)
             .followSslRedirects(false)
             .cookieJar(CookieJar.NO_COOKIES)
@@ -313,14 +351,17 @@ private fun parseSecureXml(xml: String): Document {
     val normalized = xml.removePrefix("\uFEFF").trimStart()
     require(normalized.length <= MAX_XML_CHARS) { "XML 输入超过 4 MiB 上限" }
     require(normalized.isNotBlank()) { "XML 输入为空" }
+    // Android's Harmony DOM factory only implements the SAX namespace/validation feature flags.
+    // Reject declarations before parsing and install a fail-closed resolver independently of flags.
+    require(!normalized.contains("<!DOCTYPE") && !normalized.contains("<!ENTITY")) { "禁止 XML DTD 和实体声明" }
     val factory = DocumentBuilderFactory.newInstance().apply {
         isNamespaceAware = true
         isValidating = false
-        setFeatureStrict(this, XMLConstants.FEATURE_SECURE_PROCESSING, true)
-        setFeatureStrict(this, "http://apache.org/xml/features/disallow-doctype-decl", true)
-        setFeatureStrict(this, "http://xml.org/sax/features/external-general-entities", false)
-        setFeatureStrict(this, "http://xml.org/sax/features/external-parameter-entities", false)
-        setFeatureStrict(this, "http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
+        setFeatureIfSupported(this, XMLConstants.FEATURE_SECURE_PROCESSING, true)
+        setFeatureIfSupported(this, "http://apache.org/xml/features/disallow-doctype-decl", true)
+        setFeatureIfSupported(this, "http://xml.org/sax/features/external-general-entities", false)
+        setFeatureIfSupported(this, "http://xml.org/sax/features/external-parameter-entities", false)
+        setFeatureIfSupported(this, "http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
         try {
             isXIncludeAware = false
         } catch (_: UnsupportedOperationException) {
@@ -331,6 +372,7 @@ private fun parseSecureXml(xml: String): Document {
         trySetAttribute(this, "http://javax.xml.XMLConstants/property/accessExternalSchema", "")
     }
     val builder: DocumentBuilder = factory.newDocumentBuilder()
+    builder.setEntityResolver { _, _ -> throw org.xml.sax.SAXException("禁止解析 XML 外部实体") }
     builder.setErrorHandler(object : ErrorHandler {
         override fun warning(e: SAXParseException) = Unit
         override fun error(e: SAXParseException) { throw e }
@@ -339,11 +381,11 @@ private fun parseSecureXml(xml: String): Document {
     return builder.parse(InputSource(StringReader(normalized)))
 }
 
-private fun setFeatureStrict(factory: DocumentBuilderFactory, name: String, value: Boolean) {
+private fun setFeatureIfSupported(factory: DocumentBuilderFactory, name: String, value: Boolean) {
     try {
         factory.setFeature(name, value)
-    } catch (e: Exception) {
-        throw IllegalStateException("Required secure XML feature is unavailable: ${name}", e)
+    } catch (_: javax.xml.parsers.ParserConfigurationException) {
+        // Declaration rejection and the resolver above do not depend on the factory flags.
     }
 }
 

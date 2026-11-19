@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import XCTest
 @testable import PodcastKit
 final class WebDavClientTests: XCTestCase {
@@ -27,6 +30,33 @@ final class WebDavClientTests: XCTestCase {
         <?xml version="1.0"?><!DOCTYPE foo [<!ENTITY x SYSTEM "file:///etc/passwd">]><d:multistatus xmlns:d="DAV:"/>
         """
         XCTAssertThrowsError(try WebDavXMLParser.parse(Data(xxe.utf8), requestSegments: ["dav"], prefixSegments: ["dav"]))
+    }
+
+    func testEnterpriseProbeOnlyRequestsTheSpecifiedWebDavEndpoint() async throws {
+        let base = try XCTUnwrap(URL(string: "https://dav.example.com/dav/"))
+        let valid = Data("<d:multistatus xmlns:d=\"DAV:\"/>".utf8)
+        let html = Data("<html><body>Sign in</body></html>".utf8)
+        let samples: [(Int, Data, WebDavConnectionCheck)] = [
+            (207, valid, .ready), (200, html, .notWebDav), (302, html, .redirect),
+            (401, Data(), .authenticationRequired), (403, Data(), .forbidden),
+            (405, Data(), .notWebDav), (502, Data(), .badResponse)
+        ]
+        for (status, body, expected) in samples {
+            let client = WebDavClient(baseURL: base, credentials: SourceCredentials(),
+                                      transport: SourceTransport(), sender: { request in
+                let url = try XCTUnwrap(request.url)
+                XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath, "/dav/department/")
+                XCTAssertEqual(request.httpMethod, "PROPFIND")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Depth"), "0")
+                XCTAssertFalse(request.httpShouldHandleCookies)
+                let headers = status == 302 ? ["Location": "https://login.example.com/"] : nil
+                let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: status,
+                                                             httpVersion: nil, headerFields: headers))
+                return (body, response)
+            })
+            let actual = try await client.testConnection(path: "department")
+            XCTAssertEqual(actual, expected)
+        }
     }
 
     func testStatusMappingIsFixedAndSafe() {

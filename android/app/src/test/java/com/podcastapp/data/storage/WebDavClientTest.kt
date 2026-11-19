@@ -3,6 +3,11 @@ package com.podcastapp.data.storage
 import com.podcastapp.data.feed.CredentialKind
 import com.podcastapp.data.feed.SourceCredentials
 import com.podcastapp.data.feed.SourceTransport
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -113,6 +118,36 @@ class WebDavClientTest {
             <d:multistatus xmlns:d="DAV:"><d:response><d:href>&xxe;</d:href></d:response></d:multistatus>
         """.trimIndent()
         assertThrows(Exception::class.java) { parsePropFindXml(xxe) }
+    }
+
+    @Test
+    fun distinguishesEnterpriseEndpointFromLoginPageAndPolicyErrors() {
+        val classify = WebDavConnectionCheck.Companion::fromResponse
+        assertEquals(WebDavConnectionCheck.READY, classify(207, multistatus(response("/files/"))))
+        assertEquals(WebDavConnectionCheck.REDIRECT, classify(302, ""))
+        assertEquals(WebDavConnectionCheck.AUTH_REQUIRED, classify(401, ""))
+        assertEquals(WebDavConnectionCheck.FORBIDDEN, classify(403, ""))
+        assertEquals(WebDavConnectionCheck.NOT_WEBDAV, classify(200, "<html><body>Sign in</body></html>"))
+        assertEquals(WebDavConnectionCheck.NOT_WEBDAV, classify(405, ""))
+        assertEquals(WebDavConnectionCheck.BAD_RESPONSE, classify(502, ""))
+    }
+
+    @Test
+    fun enterpriseProbeSendsDepthZeroAndDoesNotFollowRedirect() {
+        val requests = mutableListOf<Request>()
+        val client = WebDavClient("https://dav.example.com/dav/", SourceCredentials(), SourceTransport()) {
+            OkHttpClient.Builder().addInterceptor { chain ->
+                val request = chain.request().also(requests::add)
+                Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                    .code(302).message("Found").header("Location", "/login/")
+                    .body("".toResponseBody()).build()
+            }
+        }
+        assertEquals(WebDavConnectionCheck.REDIRECT, client.testConnection("department").getOrThrow())
+        val request = requests.single()
+        assertEquals("/dav/department/", request.url.encodedPath)
+        assertEquals("PROPFIND", request.method)
+        assertEquals("0", request.header("Depth"))
     }
 
     @Test

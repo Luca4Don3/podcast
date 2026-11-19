@@ -52,6 +52,7 @@ import com.podcastapp.data.storage.StorageMedia
 import com.podcastapp.data.storage.StorageProvider
 import com.podcastapp.data.storage.StorageSource
 import com.podcastapp.data.storage.WebDavClient
+import com.podcastapp.data.storage.WebDavConnectionCheck
 import com.podcastapp.data.storage.WebDavEntry
 import com.podcastapp.playback.PlaybackHolder
 import com.podcastapp.ui.SharedImport
@@ -148,6 +149,8 @@ fun DiscoverScreen(
     var storageSecret by remember { mutableStateOf("") }
     var storageHeaderName by remember { mutableStateOf("X-API-Key") }
     var storageMessage by remember { mutableStateOf<String?>(null) }
+    var checkingEnterpriseStorage by remember { mutableStateOf(false) }
+    var enterpriseStorageCheck by remember { mutableStateOf<String?>(null) }
     val storageLabelFocus = remember { FocusRequester() }
     val storageBaseUrlFocus = remember { FocusRequester() }
     val storageRootPathFocus = remember { FocusRequester() }
@@ -205,20 +208,48 @@ fun DiscoverScreen(
             }.onFailure { error -> browserError = "播放失败：${error.message ?: "未知错误"}" }
         }
     }
+    fun currentStorageCredentials(): SourceCredentials = when (storageAuthKind) {
+        CredentialKind.NONE -> SourceCredentials()
+        CredentialKind.BASIC -> SourceCredentials(kind = CredentialKind.BASIC, username = storageUsername, secret = storageSecret)
+        CredentialKind.BEARER -> SourceCredentials(kind = CredentialKind.BEARER, secret = storageSecret)
+        CredentialKind.API_KEY -> SourceCredentials(
+            kind = CredentialKind.API_KEY,
+            secret = storageSecret,
+            header = storageHeaderName.ifBlank { "X-API-Key" },
+        )
+        CredentialKind.DIGEST -> SourceCredentials(kind = CredentialKind.DIGEST, username = storageUsername, secret = storageSecret)
+    }
+    fun currentStorageTransport() = SourceTransport(digest = storageAuthKind == CredentialKind.DIGEST)
+    fun checkEnterpriseStorage() {
+        if (checkingEnterpriseStorage) return
+        val base = storageBaseUrl.trim()
+        val path = storageRootPath
+        val credentials = currentStorageCredentials()
+        val transport = currentStorageTransport()
+        checkingEnterpriseStorage = true
+        enterpriseStorageCheck = null
+        scope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    runCatching { WebDavClient(base, credentials, transport).testConnection(path).getOrThrow() }
+                }
+                enterpriseStorageCheck = result.fold({ it.enterpriseMessage() }, { error ->
+                    when (error) {
+                        is IllegalArgumentException -> "地址或路径无效。请填写企业分配的 WebDAV 地址。"
+                        is java.net.UnknownHostException -> "无法解析企业域名，请检查飞连路由和企业 DNS。"
+                        is javax.net.ssl.SSLException -> "TLS 校验失败，请检查企业证书配置。"
+                        else -> "无法完成连接，请检查飞连是否已连接、本应用的分流策略及目标服务。"
+                    }
+                })
+            } finally {
+                checkingEnterpriseStorage = false
+            }
+        }
+    }
     fun addStorageSource() {
         scope.launch {
-            val selectedCredentials = when (storageAuthKind) {
-                CredentialKind.NONE -> SourceCredentials()
-                CredentialKind.BASIC -> SourceCredentials(kind = CredentialKind.BASIC, username = storageUsername, secret = storageSecret)
-                CredentialKind.BEARER -> SourceCredentials(kind = CredentialKind.BEARER, secret = storageSecret)
-                CredentialKind.API_KEY -> SourceCredentials(
-                    kind = CredentialKind.API_KEY,
-                    secret = storageSecret,
-                    header = storageHeaderName.ifBlank { "X-API-Key" },
-                )
-                CredentialKind.DIGEST -> SourceCredentials(kind = CredentialKind.DIGEST, username = storageUsername, secret = storageSecret)
-            }
-            val selectedTransport = SourceTransport(digest = storageAuthKind == CredentialKind.DIGEST)
+            val selectedCredentials = currentStorageCredentials()
+            val selectedTransport = currentStorageTransport()
             // 提交后立即清空一次性凭据，不留在组合状态里。
             storageSecret = ""
             storageUsername = ""
@@ -494,6 +525,8 @@ fun DiscoverScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
+        CloudDriveSection()
+
         Text("网络存储（可选）", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge)
         Text(
             "添加 WebDAV 来源后可直接浏览目录并播放音频；来源信息保存在本机，凭据加密单独保存。",
@@ -513,6 +546,7 @@ fun DiscoverScreen(
                     text = { Text(storageProviderLabel(option)) },
                     onClick = {
                         storageProvider = option
+                        enterpriseStorageCheck = null
                         storageBaseUrl = ""
                         storageProviderMenuExpanded = false
                     },
@@ -527,6 +561,11 @@ fun DiscoverScreen(
             )
             StorageProvider.ZSPACE -> Text(
                 "极空间：请先在 NAS 的系统设置中开启 WebDAV，再填写实际的 HTTPS/HTTP 地址与根路径；应用不会自动发现设备。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            StorageProvider.FEILIAN -> Text(
+                "先在飞连客户端完成企业登录和网络连接，再填写管理员提供的内网 WebDAV 地址。本应用走系统路由，不接受飞连账号密码或浏览器 SSO 页面。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.primary,
             )
@@ -630,6 +669,14 @@ fun DiscoverScreen(
                 keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus(); addStorageSource() }),
                 modifier = Modifier.fillMaxWidth().focusRequester(storageHeaderNameFocus),
             )
+        }
+        if (storageProvider == StorageProvider.FEILIAN) {
+            TextButton(
+                onClick = { focusManager.clearFocus(); checkEnterpriseStorage() },
+                enabled = storageBaseUrl.isNotBlank() && !checkingEnterpriseStorage,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (checkingEnterpriseStorage) "正在测试…" else "测试企业 WebDAV（不保存）") }
+            enterpriseStorageCheck?.let { Text("上次测试：$it", style = MaterialTheme.typography.bodySmall) }
         }
         Button(
             onClick = { focusManager.clearFocus(); addStorageSource() },
@@ -793,6 +840,16 @@ private fun storageProviderLabel(provider: StorageProvider): String = when (prov
     StorageProvider.WEBDAV -> "通用 WebDAV"
     StorageProvider.JIANGUOYUN -> "坚果云"
     StorageProvider.ZSPACE -> "极空间"
+    StorageProvider.FEILIAN -> "飞连企业网络（WebDAV）"
+}
+
+private fun WebDavConnectionCheck.enterpriseMessage() = when (this) {
+    WebDavConnectionCheck.READY -> "已收到有效 WebDAV 响应；这不是飞连登录状态。"
+    WebDavConnectionCheck.AUTH_REQUIRED -> "已到达服务，但需要该 WebDAV 来源自己的凭据。"
+    WebDavConnectionCheck.FORBIDDEN -> "已到达服务，但访问被拒绝，请核对企业策略和目录权限。"
+    WebDavConnectionCheck.REDIRECT -> "服务要求跳转（可能是网页统一登录），请使用直连 WebDAV 地址。"
+    WebDavConnectionCheck.NOT_WEBDAV -> "未收到有效 WebDAV 响应，请核对路径，不要填写网页登录页。"
+    WebDavConnectionCheck.BAD_RESPONSE -> "服务返回异常状态，请检查企业网关或 WebDAV 服务。"
 }
 
 private fun isAudioEntry(entry: WebDavEntry): Boolean {

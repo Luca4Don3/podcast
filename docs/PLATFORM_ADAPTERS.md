@@ -19,12 +19,17 @@
 - **WebDAV**：RFC 4918；用 PROPFIND Depth:1 有界列目录，GET/Range 需逐服务实测，206/416 才标为可拖动。
 - **坚果云**：官方 WebDAV https://dav.jianguoyun.com/dav/，使用邮箱 + 应用密码，不是网页登录密码。
 - **极空间**：没有公开私有 API；需要用户在 NAS 系统设置中开启 WebDAV，并由用户填写实际可达地址。App 不发现设备、不建立 VPN、不使用私有接口。
-- **飞连**：火山引擎企业办公安全平台，SSO/OpenAPI 由企业租户管理员配置，没有给任意第三方 App 的公开登录 SDK。系统 VPN 可达不等于 App 内已完成授权；只有管理员配置 SSO 应用后才能接，当前不显示为已支持。
-- **百度网盘 / 阿里云盘个人版**：官方开放 API 需注册应用与审核；新百度应用仅可读取 /apps/应用名 目录，不能声称全盘支持。
-- **OneDrive / Google Drive**：可走官方 OAuth。OneDrive 用 Microsoft Graph 的 Files.Read；Google 推荐 drive.file + Picker。缺少注册 application/client ID 时不能实现登录。
-- **系统文件选择器**：Android SAF 与 iOS UIDocumentPicker 可在无厂商注册时由用户选择云盘/本机文件，作为补充路径，不替代 WebDAV。
+- **飞连**：独立的「飞连企业网络（WebDAV）」来源，使用飞连客户端或企业 MDM 已下发的系统路由。从输入的企业 WebDAV 地址执行只读试连（PROPFIND Depth:0），不自动跳转；分别提示登录页或非 WebDAV、需要来源自己的凭据、权限拒绝、响应异常等。试连不保存配置。它检测的是目标服务，不是 VPN 是否启用，也不收集飞连密码、读浏览器 Cookie、建立 VPN 或绕开企业策略。仅浏览器可用的[应用网关](https://docs.volcengine.com/docs/feilian/application-gateway-overview)不等于存在原生 WebDAV 地址。
+- **OneDrive**：独立来源，使用 Microsoft [设备码 OAuth](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code)和 [Graph 文件接口](https://learn.microsoft.com/en-us/graph/api/driveitem-get-content?view=graph-rest-1.0)。授权时去微软页面输入设备码；App 不接收微软账号密码。支持只读目录浏览和选择音频。令牌留在本次应用会话，不保存下载地址，也不向媒体 CDN 发送 Graph 令牌。
+- **阿里云盘个人版**：已核实[Android 官方 SDK](https://github.com/alibaba/aliyunpan-android-sdk)与 [iOS 官方 SDK](https://alibaba.github.io/aliyunpan-ios-sdk/)都提供公开客户端 PKCE 路径。它与阿里云 PDS 是不同产品；本次没有接入 SDK，不把官方可适配写成已实现。
+- **百度网盘**：[设备码授权](https://pan.baidu.com/union/doc/使用入门/接入授权/设备码模式授权/)获取设备码与兑换令牌的条件不同；兑换和刷新需要 SecretKey，不能打包进纯客户端。未接入。
+- **Google Drive**：优先评估 [drive.file 与 Picker](https://developers.google.com/workspace/drive/api/guides/api-specific-auth) 的按文件授权，不申请全盘权限；本次未实现。
+- **系统文件选择器**：Android SAF 与 Apple Files / 文档选择器是独立的系统提供者路径；本次不将它算作厂商登录适配。
 
-当前客户端实现的是 WebDAV 类来源（含坚果云预设和极空间用户自填地址）。需要厂商注册/审核的网盘与企业飞连不会用私有接口或 Cookie 冒充已支持。
+### 配置与验收
+
+- **OneDrive**：使用在 Microsoft Entra 中注册的公开客户端应用 ID，启用公开客户端流，并配置目标帐户类型及委托权限 Files.Read；请求 offline_access 以在当前会话刷新授权。不需要在客户端配置 secret 或回调 URL。组织可通过[条件访问策略](https://learn.microsoft.com/en-us/entra/identity/conditional-access/policy-block-authentication-flows)禁用设备码流；不绕开这一限制。
+- **飞连**：先由企业侧在飞连建立授权网络，确保本应用和目标域名/IP、端口在分流允许范围内。再将管理员提供的原生 WebDAV 地址填入来源，点击「测试企业 WebDAV（不保存）」。需要鉴权时，填 WebDAV 来源自己的凭据，不填飞连登录凭据。
 
 ## 传输、认证与键盘
 
@@ -44,5 +49,5 @@
 ## 当前限制
 
 - WebDAV Range、坚果云应用密码、极空间固件差异和真实 NAS 网络路径尚未做真机/服务端联调。
-- 官方 OAuth 网盘需要应用注册信息与合法回调；飞连需要企业租户配置。未取得前只提供说明，不提供伪登录。
+- 实现与真实环境验收分开：未使用真实 OneDrive 应用/账户或飞连租户联调；不承诺所有企业租户、分流和证书组合。
 - 任何“可访问”都不代表版权授权，公开运营仍需自行核实。
