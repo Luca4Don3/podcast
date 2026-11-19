@@ -1,6 +1,7 @@
 package com.podcastapp
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -9,9 +10,13 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import com.podcastapp.playback.NotificationPermission
 import com.podcastapp.ui.PodcastAppRoot
+import com.podcastapp.ui.SharedImport
 import com.podcastapp.ui.adaptive.rememberFoldingFeatures
 import com.podcastapp.ui.theme.PodcastAppTheme
 
@@ -28,6 +33,20 @@ class MainActivity : ComponentActivity() {
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    private var pendingImport by mutableStateOf<SharedImport?>(null)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingImport = sharedImport(intent)
+    }
+
+    private fun sharedImport(intent: Intent?): SharedImport? {
+        val value = intent?.getStringExtra(Intent.EXTRA_TEXT)?.takeIf { it.isNotBlank() }
+            ?: intent?.data?.toString()?.takeIf { it.isNotBlank() }
+        return value?.let { SharedImport(it) }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.auto(
@@ -40,6 +59,7 @@ class MainActivity : ComponentActivity() {
             ),
         )
         super.onCreate(savedInstanceState)
+        pendingImport = sharedImport(intent)
         requestNotificationPermissionIfNeeded()
 
         setContent {
@@ -47,6 +67,8 @@ class MainActivity : ComponentActivity() {
                 PodcastAppRoot(
                     activity = this@MainActivity,
                     folds = rememberFoldingFeatures(this@MainActivity),
+                    sharedImport = pendingImport,
+                    onSharedImportConsumed = { pendingImport = null },
                 )
             }
         }

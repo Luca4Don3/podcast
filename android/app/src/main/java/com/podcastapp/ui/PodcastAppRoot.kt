@@ -71,6 +71,8 @@ import com.podcastapp.ui.podcast.PodcastDetailScreen
 import com.podcastapp.ui.settings.SettingsScreen
 import kotlinx.coroutines.launch
 
+data class SharedImport(val text: String, val id: Long = System.nanoTime())
+
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
 
 private val tabs = listOf(
@@ -84,6 +86,8 @@ private val tabs = listOf(
 internal fun PodcastAppRoot(
     activity: Activity? = null,
     folds: List<FoldFeature> = emptyList(),
+    sharedImport: SharedImport? = null,
+    onSharedImportConsumed: () -> Unit = {},
     appViewModel: AppViewModel = viewModel(),
 ) {
     val toast by appViewModel.toast.collectAsState()
@@ -97,7 +101,7 @@ internal fun PodcastAppRoot(
     }
 
     AdaptiveWindow(activity, folds) { profile ->
-        MainShell(profile, snackbarHost)
+        MainShell(profile, snackbarHost, sharedImport, onSharedImportConsumed)
     }
 }
 
@@ -106,6 +110,8 @@ internal fun PodcastAppRoot(
 private fun MainShell(
     profile: ScreenProfile,
     snackbarHost: SnackbarHostState,
+    sharedImport: SharedImport?,
+    onSharedImportConsumed: () -> Unit,
 ) {
     val navController = rememberNavController()
     val playerViewModel: PlayerViewModel = viewModel()
@@ -127,6 +133,10 @@ private fun MainShell(
             launchSingleTop = true
             restoreState = true
         }
+    }
+
+    LaunchedEffect(sharedImport?.id) {
+        if (sharedImport != null) openTab("discover")
     }
 
     val play: (com.podcastapp.data.remote.EpisodeDto, String, String) -> Unit = { episode, title, artwork ->
@@ -222,6 +232,8 @@ private fun MainShell(
                 DiscoverScreen(
                     onOpenPodcast = { id -> navController.navigate("podcast/" + id) },
                     onOpenFileMedia = {},
+                    initialImport = sharedImport,
+                    onInitialImportConsumed = onSharedImportConsumed,
                 )
             }
             composable("podcast/{id}") { entry ->

@@ -18,6 +18,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -29,6 +30,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.podcastapp.data.feed.platformLabel
+import com.podcastapp.ui.SharedImport
 import com.podcastapp.ui.components.InlineIssue
 
 @Composable
@@ -36,9 +38,17 @@ import com.podcastapp.ui.components.InlineIssue
 fun DiscoverScreen(
     onOpenPodcast: (String) -> Unit,
     onOpenFileMedia: () -> Unit,
+    initialImport: SharedImport? = null,
+    onInitialImportConsumed: () -> Unit = {},
     viewModel: PlatformImportViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsState()
+    LaunchedEffect(initialImport?.id) {
+        if (initialImport != null) {
+            viewModel.acceptShared(initialImport.text)
+            onInitialImportConsumed()
+        }
+    }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),

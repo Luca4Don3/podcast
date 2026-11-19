@@ -26,7 +26,7 @@ data class PlatformImportUiState(
 
 /** 平台分享链接导入：只依赖本地公开 feed 库，不访问自建后端。 */
 class PlatformImportViewModel(app: Application) : AndroidViewModel(app) {
-    private val library = LocalPodcastLibrary(app.applicationContext)
+    private val library = LocalPodcastLibrary.get(app.applicationContext)
     private val _state = MutableStateFlow(PlatformImportUiState())
     val state: StateFlow<PlatformImportUiState> = _state.asStateFlow()
 
@@ -34,6 +34,16 @@ class PlatformImportViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             library.feeds.collect { feeds -> _state.value = _state.value.copy(feeds = feeds) }
         }
+    }
+
+    internal fun acceptShared(text: String) {
+        val url = extractSharedUrl(text)
+        if (url == null) {
+            _state.value = _state.value.copy(error = "未在分享内容中找到有效的播客链接", message = null)
+            return
+        }
+        setInput(url)
+        `import`()
     }
 
     fun setInput(value: String) {
@@ -122,4 +132,11 @@ class PlatformImportViewModel(app: Application) : AndroidViewModel(app) {
             FeedPlatform.DIRECT -> "已识别公开 RSS / OPML 地址"
         }
     }
+}
+
+internal fun extractSharedUrl(text: String): String? {
+    val value = text.trim()
+    if (value.isEmpty() || value.any { it.isISOControl() }) return null
+    val match = Regex("https?://\\S+").find(value)?.value ?: value
+    return runCatching { PlatformFeedAdapter.normalize(match).getOrThrow().url }.getOrNull()
 }
