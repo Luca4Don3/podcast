@@ -100,8 +100,7 @@ bool valid_public_url(const std::wstring &text, Uri &uri) {
 void set_title(MediaPlaybackItem &item, const std::wstring &title) {
     try {
         auto props = item.GetDisplayProperties();
-        props.Title(title);
-        props.Type(MediaMediaType::Audio);
+        props.MusicProperties().Title(title);
         item.ApplyDisplayProperties(props);
     } catch (...) { /* Metadata is optional for playback. */ }
 }
@@ -188,12 +187,11 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             open_local_file(hwnd);
         } else if (id == kPlayPause) {
             if (!g_session || !g_player.Source()) { set_status(L"请先加载音频"); break; }
-            if (g_session.PlaybackState() == MediaPlaybackState::Playing) g_session.Pause();
+            if (g_session.PlaybackState() == MediaPlaybackState::Playing) g_player.Pause();
             else g_player.Play();
             refresh_status();
         } else if (id == kStop) {
-            if (g_session) g_session.Pause();
-            if (g_player.Source()) g_player.Source(MediaPlaybackSource{});
+            if (g_player.Source()) g_player.Source(nullptr);
             set_status(L"已停止");
         } else if (id == kSeekBack || id == kSeekForward) {
             if (g_session && g_session.CanSeek()) {
@@ -256,7 +254,7 @@ int run(int argc, wchar_t **argv) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
-    g_player.Source(MediaPlaybackSource{});
+    g_player.Source(nullptr);
     g_player = nullptr;
     g_session = nullptr;
     return 0;
