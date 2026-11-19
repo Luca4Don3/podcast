@@ -7,7 +7,7 @@ final class WebDavClientTests: XCTestCase {
         XCTAssertThrowsError(try WebDavURLPolicy.canonicalOrigin(URL(string: "https://user:pass@dav.example.com/")!))
         XCTAssertThrowsError(try WebDavURLPolicy.canonicalOrigin(URL(string: "https://dav.example.com/?token=abc")!))
         XCTAssertThrowsError(try WebDavURLPolicy.relativeSegments("../secret"))
-        XCTAssertEqual(try? WebDavURLPolicy.relativeSegments("Music/my ep.mp3"), ["Music", "my ep.mp3"])
+        XCTAssertEqual(try? WebDavURLPolicy.relativeSegments("Music/my%20ep.mp3"), ["Music", "my ep.mp3"])
     }
     func testPropfindXmlParsesEntriesAndRejectsDtd() throws {
         let xml = """
