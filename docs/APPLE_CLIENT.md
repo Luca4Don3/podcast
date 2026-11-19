@@ -16,6 +16,8 @@
 - 真机调试：在 Xcode 的 **Signing & Capabilities** 为 `podcast` target 选自己的 Team，启用自动签名；如果默认 bundle identifier 不归你的团队，请改用团队可用的唯一标识。连接 iPhone 或 iPad、开启开发者模式，选择对应物理设备运行。
 - TestFlight：使用有权限的 Apple Developer 团队和同一 bundle identifier 在 App Store Connect 创建或选用既有 app，然后从 Xcode 对通用 iOS 设备 Archive，经 Organizer 验证和上传。应用图标、隐私资料及发布审核另行准备。本仓库不存储签名凭证，不自动上传 TestFlight／App Store。
 
+[iPhone／iPad 模拟器 CI](<https://github.com/Luca4Don3/podcast/actions/runs/44430683923>) 已通过两种设备的安装、启动，以及 10 项 API 单测。尚未进行签名真机验收。
+
 ## iPad 布局验收
 
 使用专用测试账号，准备至少一个有可定位 HTTPS 单集的订阅。以下为交互验收步骤，不等同于 CI 的启动测试：
