@@ -12,14 +12,11 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
-import com.podcastapp.data.ServiceLocator
-import com.podcastapp.data.ProgressOwner
-import com.podcastapp.data.progressOwner
 import com.podcastapp.data.filemedia.FileMediaPlayback
 import com.podcastapp.data.filemedia.FileStreamFactory
+import com.podcastapp.data.feed.LocalPodcastLibrary
 import com.podcastapp.data.remote.EpisodeDto
 import com.podcastapp.data.remote.StationDto
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,8 +28,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 data class NowPlayingFile(val id: String, val title: String)
@@ -101,12 +96,6 @@ object PlaybackHolder {
     private var appContext: Context? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var podcastSpeed = 1f
-    private var resumeJob: Job? = null
-    private var restoringPosition = false
-    private var manualSeekMediaId: String? = null
-    private var owner: ProgressOwner? = null
-    private var sessionObserver: Job? = null
-    private var fileSessionObserver: Job? = null
     private var fileStreamFactory: FileStreamFactory? = null
     private var ticker: Job? = null
     private var hasUi = false
@@ -114,8 +103,6 @@ object PlaybackHolder {
     private var durationMediaId: String? = null
     private var knownDurationMs = 0L
     private var lastCheckpoint: ProgressCheckpoint? = null
-    private val pendingProgress = linkedMapOf<String, ProgressCheckpoint>()
-    private var writer: Job? = null
 
     private val _playback = MutableStateFlow(PlaybackSnapshot())
     internal val playback: StateFlow<PlaybackSnapshot> = _playback.asStateFlow()
@@ -166,12 +153,9 @@ object PlaybackHolder {
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     val id = mediaItem?.mediaId
                     if (_nowPlaying.value.file?.let { it.id != id } == true) clearFilePlayback()
-                    resumeJob?.cancel()
-                    if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) manualSeekMediaId = null
                     _lastError.value = null
                     _queue.value.firstOrNull { it.id == id }?.let { episode ->
                         _nowPlaying.value = _nowPlaying.value.copy(episode = episode, station = null)
-                        if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) resumeFrom(episode.id)
                     }
                 }
 
@@ -184,9 +168,7 @@ object PlaybackHolder {
                             save(progressCheckpoint(oldId, oldPosition.positionMs, knownDurationMs,
                                 completed = reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION))
                         }
-                    } else if (reason == Player.DISCONTINUITY_REASON_SEEK && !restoringPosition) {
-                        manualSeekMediaId = newId
-                        resumeJob?.cancel()
+                    } else if (reason == Player.DISCONTINUITY_REASON_SEEK) {
                         checkpoint(allowZero = true)
                     }
                 }
@@ -210,30 +192,6 @@ object PlaybackHolder {
         }
         player = exo
         publishPlayback(exo)
-        if (sessionObserver == null) {
-            sessionObserver = scope.launch {
-                ServiceLocator.sessionStore.session.map { it.progressOwner() }.distinctUntilChanged().collect { next ->
-                    if (owner != null) {
-                        // 退出或换服后不能继续播放旧媒体，也不能把待发送进度归到新会话。
-                        owner = null
-                        resumeJob?.cancel()
-                        writer?.cancel()
-                        pendingProgress.clear()
-                        lastCheckpoint = null
-                        clearFilePlayback()
-                        player?.apply {
-                            stop()
-                            clearMediaItems()
-                        }
-                        _nowPlaying.value = NowPlaying()
-                        _queue.value = emptyList()
-                        _isLive.value = false
-                    }
-                    owner = next
-                    if (next != null) _nowPlaying.value.episode?.let { resumeFrom(it.id) }
-                }
-            }
-        }
     }
 
     fun requirePlayer(context: Context): ExoPlayer {
@@ -291,7 +249,6 @@ object PlaybackHolder {
     /** 文件是点播，只复用 Media3 和媒体服务，不读取或写入播客进度。 */
     @OptIn(UnstableApi::class)
     internal suspend fun playFile(context: Context, file: FileMediaPlayback) {
-        file.session.requireCurrent()
         currentCoroutineContext().ensureActive()
         init(context)
         val exo = player ?: return
@@ -317,21 +274,11 @@ object PlaybackHolder {
         exo.setMediaSource(source, 0L)
         fileStreamFactory = factory
         _nowPlaying.value = NowPlaying(podcastTitle = "文件音源", file = NowPlayingFile(itemId, title))
-        fileSessionObserver = scope.launch {
-            file.session.awaitInvalidation()
-            if (_nowPlaying.value.file?.id == itemId) {
-                clearFilePlayback()
-                exo.stop()
-                exo.clearMediaItems()
-            }
-        }
         exo.prepare()
         exo.play()
     }
 
     private fun clearFilePlayback() {
-        fileSessionObserver?.cancel()
-        fileSessionObserver = null
         fileStreamFactory?.cancel()
         fileStreamFactory = null
         if (_nowPlaying.value.file != null) _nowPlaying.value = NowPlaying()
@@ -406,9 +353,6 @@ object PlaybackHolder {
     fun seekTo(ms: Long) {
         val p = player ?: return
         if (!canSeek(p)) return
-        // 用户在续播请求返回前主动选择了位置，即使本次 seek 没有产生位置回调也要取消恢复。
-        manualSeekMediaId = p.currentMediaItem?.mediaId
-        resumeJob?.cancel()
         p.seekTo(ms.coerceIn(0, p.duration))
     }
 
@@ -463,7 +407,7 @@ object PlaybackHolder {
     private fun isPlayingOnDemand(p: Player?): Boolean =
         p != null && p.isPlaying && p.currentMediaItem != null && !isLiveMedia(p)
 
-    // 文件点播只在 UI 可见时刷新进度条；不为它安排云端检查点。
+    // 文件点播只在 UI 可见时刷新进度条；不为它安排本地检查点。
     private fun updateTicker(restart: Boolean = false) {
         val file = player?.currentMediaItem?.mediaId.isFileId()
         if (!isPlayingOnDemand(player) || (file && !hasUi)) {
@@ -510,57 +454,21 @@ object PlaybackHolder {
         save(snapshot, explicitSeek = allowZero)
     }
 
+    /** 进度只写入本机 LocalPodcastLibrary，不经过任何自建后端或离线同步队列。 */
     private fun save(snapshot: ProgressCheckpoint?, explicitSeek: Boolean = false) {
-        val expected = owner ?: return
         if (snapshot == null || !shouldReplaceCheckpoint(lastCheckpoint, snapshot, explicitSeek)) return
+        val ctx = appContext ?: return
         lastCheckpoint = snapshot
-        // 同一集未发送的快照只保留最新；一个进程级写入者保证旧请求不会晚于新请求写回。
-        pendingProgress[snapshot.episodeId] = snapshot
-        if (writer?.isActive == true) return
-        writer = scope.launch {
-            while (pendingProgress.isNotEmpty()) {
-                val next = pendingProgress.values.first()
-                pendingProgress.remove(next.episodeId)
-                try {
-                    if (owner == expected && ServiceLocator.sessionStore.current().progressOwner() == expected) {
-                        ServiceLocator.libraryRepository.saveProgress(expected, next.episodeId, next.positionMs, next.durationMs, next.completed)
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    // 仓库通常已回退到离线队列；不因存储失败阻塞播放器。
-                }
-            }
-        }
-    }
-
-    private fun resumeFrom(episodeId: String) {
-        if (manualSeekMediaId == episodeId) return
-        val expected = owner ?: return
-        resumeJob = scope.launch {
-            val saved = runCatching {
-                if (ServiceLocator.sessionStore.current().progressOwner() != expected) return@launch
-                ServiceLocator.libraryRepository.progress(episodeId, expected)
-            }.getOrNull() ?: return@launch
-            val p = player ?: return@launch
-            if (owner == expected && manualSeekMediaId != episodeId &&
-                p.currentMediaItem?.mediaId == episodeId && !isLiveMedia(p) &&
-                p.playbackState != Player.STATE_ENDED && saved.positionMs > 3_000 && !saved.completed) {
-                restoringPosition = true
-                try {
-                    p.seekTo(saved.positionMs)
-                } finally {
-                    restoringPosition = false
-                }
-            }
+        runCatching {
+            LocalPodcastLibrary.get(ctx).recordProgress(
+                snapshot.episodeId, snapshot.positionMs, snapshot.durationMs, snapshot.completed,
+            )
         }
     }
 
     fun release() {
         checkpoint()
         clearFilePlayback()
-        resumeJob?.cancel()
-        manualSeekMediaId = null
         ticker?.cancel()
         ticker = null
         syncAtMs = null

@@ -3,7 +3,7 @@ package com.podcastapp.ui.player
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.podcastapp.data.ServiceLocator
+import com.podcastapp.data.feed.LocalPodcastLibrary
 import com.podcastapp.data.remote.SettingsDto
 import com.podcastapp.playback.PlaybackHolder
 import com.podcastapp.playback.NowPlaying
@@ -12,7 +12,6 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
 
 data class PlayerUiState(
     val playing: Boolean = false,
@@ -52,12 +51,12 @@ fun PlayerUiState.withNowPlaying(now: NowPlaying, resetPosition: Boolean = true)
     )
 }
 
-/** UI 只在有订阅时观察播放器；后台续播和进度保存由 PlaybackHolder 负责。 */
+/** UI 只在有订阅时观察播放器；进度与偏好都保存在本机的 LocalPodcastLibrary。 */
 class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val library = ServiceLocator.libraryRepository
+    private val library = LocalPodcastLibrary.get(app.applicationContext)
     private val holder = PlaybackHolder
-    private var settings: SettingsDto = SettingsDto()
+    private var settings: SettingsDto = library.state.value.settings
 
     val state: StateFlow<PlayerUiState> = combine(
         holder.nowPlaying, holder.playback, holder.lastError,
@@ -82,12 +81,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(), PlayerUiState())
 
     init {
-        viewModelScope.launch {
-            runCatching { library.settings() }.onSuccess {
-                settings = it
-                holder.setSpeed(it.playbackSpeed.toFloat())
-            }
-        }
+        holder.setSpeed(settings.playbackSpeed.toFloat())
         SleepTimer.onExpire = holder::pause
     }
 
@@ -103,10 +97,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         if (holder.isLive.value) return
         val clamped = speed.coerceIn(0.5f, 3.0f)
         holder.setSpeed(clamped)
-        viewModelScope.launch {
-            settings = settings.copy(playbackSpeed = clamped.toDouble())
-            runCatching { library.saveSettings(settings) }
-        }
+        settings = settings.copy(playbackSpeed = clamped.toDouble())
+        library.saveSettings(settings)
     }
 
     /** 睡眠定时器：分钟数，0 表示取消。 */

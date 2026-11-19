@@ -1,10 +1,13 @@
 package com.podcastapp.ui.podcast
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.podcastapp.data.ServiceLocator
+import com.podcastapp.data.feed.LocalFeed
+import com.podcastapp.data.feed.LocalPodcastLibrary
 import com.podcastapp.data.remote.EpisodeDto
 import com.podcastapp.data.remote.PodcastDto
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -18,16 +21,19 @@ data class PodcastDetailUiState(
     val subscribed: Boolean = false,
 )
 
-class PodcastDetailViewModel : ViewModel() {
+/** 节目详情只读本地公开 feed 库：不访问 ServiceLocator，也不访问后端仓库。 */
+class PodcastDetailViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val podcasts = ServiceLocator.podcastRepository
-    private val library = ServiceLocator.libraryRepository
+    private val library = LocalPodcastLibrary.get(app.applicationContext)
 
     private val _state = MutableStateFlow(PodcastDetailUiState())
     val state: StateFlow<PodcastDetailUiState> = _state.asStateFlow()
 
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
+
+    /** 保留已加载的本地订阅，取消订阅后仍可用其 sourceUrl 重新导入。 */
+    private var loadedFeed: LocalFeed? = null
 
     fun consumeMessage() {
         _message.value = null
@@ -37,49 +43,64 @@ class PodcastDetailViewModel : ViewModel() {
         viewModelScope.launch {
             _state.value = _state.value.copy(loading = true, error = null)
             try {
-                var detail = podcasts.podcast(podcastId)
-                if (forceRefresh) {
-                    detail = runCatching { podcasts.refresh(podcastId) }.getOrDefault(detail)
+                val cached = library.feeds.value.firstOrNull {
+                    it.id == podcastId || it.podcast.id == podcastId
                 }
-                val episodes = podcasts.episodes(podcastId)
+                val feed = cached ?: loadedFeed?.takeIf {
+                    it.id == podcastId || it.podcast.id == podcastId
+                }
+                if (feed == null) {
+                    _state.value = PodcastDetailUiState(loading = false, error = "本地没有该节目的公开 feed 订阅")
+                    return@launch
+                }
+                val resolved = if (forceRefresh) library.refresh(feed.id).getOrElse { feed } else feed
+                loadedFeed = resolved
                 _state.value = PodcastDetailUiState(
                     loading = false,
-                    podcast = detail,
-                    episodes = episodes,
-                    subscribed = detail.subscribed,
+                    podcast = resolved.podcast,
+                    episodes = resolved.episodes,
+                    subscribed = library.feeds.value.any { it.id == resolved.id },
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                _state.value = _state.value.copy(loading = false, error = e.message)
+                _state.value = _state.value.copy(loading = false, error = e.message ?: "加载失败")
             }
         }
     }
 
+    /** 已订阅则移除；已移除则用保存的 sourceUrl 重新导入同一公开 feed。 */
     fun toggleSubscribe() {
-        val podcast = _state.value.podcast ?: return
+        val feed = loadedFeed ?: return
         viewModelScope.launch {
-            val next = !_state.value.subscribed
+            val currentlySubscribed = library.feeds.value.any { it.id == feed.id }
             runCatching {
-                if (next) library.subscribe(podcast.id) else library.unsubscribe(podcast.id)
+                if (currentlySubscribed) library.remove(feed.id) else library.`import`(feed.sourceUrl)
             }.onSuccess {
+                val next = library.feeds.value.any { it.id == feed.id }
                 _state.value = _state.value.copy(subscribed = next)
-                _message.value = if (next) "已订阅" else "已取消订阅"
-            }.onFailure { _message.value = it.message }
+                _message.value = if (next) "已重新订阅" else "已取消订阅"
+            }.onFailure { error ->
+                _message.value = error.message ?: "操作失败"
+            }
         }
     }
 
     fun toggleQueued(episode: EpisodeDto) {
         viewModelScope.launch {
-            runCatching { library.setQueued(episode.id, true) }
-                .onSuccess { _message.value = "已加入待播" }
-                .onFailure { _message.value = it.message }
+            val next = episode.id !in library.state.value.queued
+            runCatching { library.setQueued(episode.id, next) }
+                .onSuccess { _message.value = if (next) "已加入待播" else "已移出待播" }
+                .onFailure { error -> _message.value = error.message ?: "操作失败" }
         }
     }
 
     fun toggleStarred(episode: EpisodeDto) {
         viewModelScope.launch {
-            runCatching { library.setStarred(episode.id, true) }
-                .onSuccess { _message.value = "已收藏" }
-                .onFailure { _message.value = it.message }
+            val next = episode.id !in library.state.value.starred
+            runCatching { library.setStarred(episode.id, next) }
+                .onSuccess { _message.value = if (next) "已收藏" else "已取消收藏" }
+                .onFailure { error -> _message.value = error.message ?: "操作失败" }
         }
     }
 }

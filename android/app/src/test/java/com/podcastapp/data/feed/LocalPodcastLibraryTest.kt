@@ -1,10 +1,12 @@
 package com.podcastapp.data.feed
 
+import com.podcastapp.data.remote.SettingsDto
 import java.io.File
 import java.nio.file.Files
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -172,6 +174,92 @@ class LocalPodcastLibraryTest {
         assertEquals(1800, parseDurationSeconds("1800"))
         assertEquals(0, parseDurationSeconds(""))
         assertEquals(0, parseDurationSeconds("not a duration"))
+    }
+
+    @Test fun getOrCreateReturnsProcessWideSingleton() {
+        LocalPodcastLibrary.resetForTest()
+        val dir = tempDir()
+        val first = LocalPodcastLibrary.getOrCreate(dir) { error("no network expected") }
+        val second = LocalPodcastLibrary.getOrCreate(tempDir()) { error("no network expected") }
+        assertSame(first, second)
+
+        first.recordProgress("ep-singleton", 1L, 2L, false)
+        assertEquals(1, second.state.value.progress.size)
+
+        LocalPodcastLibrary.resetForTest()
+        val reloaded = LocalPodcastLibrary.getOrCreate(dir) { error("no network expected") }
+        assertEquals(first.state.value, reloaded.state.value)
+        LocalPodcastLibrary.resetForTest()
+    }
+
+    @Test fun localStateIsSavedToDiskAndReloaded() {
+        val dir = tempDir()
+        val writer = library(dir) { error("no network expected") }
+        writer.recordProgress("ep-1", 12_000L, 120_000L, false)
+        writer.recordProgress("ep-2", 90_000L, 90_000L, true)
+        writer.setStarred("ep-1", true)
+        writer.setStarred("ep-2", true)
+        writer.setStarred("ep-2", false)
+        writer.setQueued("ep-2", true)
+        writer.saveSettings(SettingsDto(1.5, 45, 20, true, "always", "dark", false))
+
+        val state = writer.state.value
+        assertEquals(2, state.progress.size)
+        val first = state.progress.getValue("ep-1")
+        assertEquals("ep-1", first.episodeId)
+        assertEquals(12_000L, first.positionMs)
+        assertEquals(120_000L, first.durationMs)
+        assertFalse(first.completed)
+        assertTrue(first.updatedAt > 0L)
+        assertTrue(state.progress.getValue("ep-2").completed)
+        assertEquals(setOf("ep-1"), state.starred)
+        assertEquals(setOf("ep-2"), state.queued)
+        assertEquals(1.5, state.settings.playbackSpeed, 0.0)
+        assertEquals(45, state.settings.skipForward)
+        assertEquals(20, state.settings.skipBack)
+        assertTrue(state.settings.autoDownload)
+        assertEquals("always", state.settings.downloadPolicy)
+        assertEquals("dark", state.settings.theme)
+        assertFalse(state.settings.notificationOn)
+
+        assertTrue(File(dir, "local_podcast_state.json").exists())
+        val reader = library(dir) { error("no network expected") }
+        assertEquals(state, reader.state.value)
+    }
+
+    @Test fun stateWritesReplaceSameKeysAndUpdateStateFlow() {
+        val library = library(tempDir()) { error("no network expected") }
+        library.recordProgress("ep-1", 1L, 10L, false)
+        val firstUpdatedAt = library.state.value.progress.getValue("ep-1").updatedAt
+        library.recordProgress("ep-1", 5L, 10L, true)
+        val updated = library.state.value.progress.getValue("ep-1")
+        assertEquals(1, library.state.value.progress.size)
+        assertEquals(5L, updated.positionMs)
+        assertTrue(updated.completed)
+        assertTrue(updated.updatedAt >= firstUpdatedAt)
+
+        library.setStarred("ep-1", true)
+        library.setQueued("ep-1", true)
+        assertEquals(setOf("ep-1"), library.state.value.starred)
+        assertEquals(setOf("ep-1"), library.state.value.queued)
+        library.setStarred("ep-1", false)
+        library.setQueued("ep-1", false)
+        assertTrue(library.state.value.starred.isEmpty())
+        assertTrue(library.state.value.queued.isEmpty())
+    }
+
+    @Test fun corruptedOrPartialStateFileFallsBackToDefaults() {
+        val dir = tempDir()
+        val stateFile = File(dir, "local_podcast_state.json")
+        stateFile.writeText("{ this is not json", Charsets.UTF_8)
+        assertEquals(LocalLibraryState(), library(dir) { error("no network expected") }.state.value)
+
+        stateFile.writeText("""{"starred":["only"]}""", Charsets.UTF_8)
+        val partial = library(dir) { error("no network expected") }.state.value
+        assertEquals(setOf("only"), partial.starred)
+        assertEquals(SettingsDto(), partial.settings)
+        assertTrue(partial.progress.isEmpty())
+        assertTrue(partial.queued.isEmpty())
     }
 
     private companion object {

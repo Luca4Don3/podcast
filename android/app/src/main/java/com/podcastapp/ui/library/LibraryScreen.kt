@@ -13,7 +13,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.IconButton
@@ -38,7 +37,6 @@ fun LibraryScreen(
     onEpisodeClick: (EpisodeDto, String, String) -> Unit,
     viewModel: LibraryViewModel = viewModel(),
     onImport: (() -> Unit)? = null,
-    onRadio: (() -> Unit)? = null,
 ) {
     val state by viewModel.state.collectAsState()
     LaunchedEffect(viewModel) { viewModel.refresh() }
@@ -50,7 +48,7 @@ fun LibraryScreen(
         state.actionError?.let { message -> item { InlineIssue(message, viewModel::retryAction, viewModel::dismissActionError, Modifier.padding(16.dp)) } }
         if (state.loaded) {
             val empty = state.recentlyPlayed.isEmpty() && state.subscriptions.isEmpty() && state.starred.isEmpty() && state.queued.isEmpty()
-            if (empty) item { LibraryStart(onImport, onRadio) }
+            if (empty) item { LibraryStart(onImport) }
             item { SectionTitle("继续收听") }
             if (state.recentlyPlayed.isEmpty()) item { SectionHint("还没有未听完的单集") }
                 if (state.recentlyPlayed.isNotEmpty()) {
@@ -70,7 +68,7 @@ fun LibraryScreen(
                 item { SectionTitle("已订阅（" + state.subscriptions.size + "）") }
                 if (state.subscriptions.isEmpty()) {
                     item {
-                        if (empty) SectionHint("还没有订阅") else LibraryStart(onImport, onRadio)
+                        if (empty) SectionHint("还没有订阅") else LibraryStart(onImport)
                     }
                 } else {
                     items(state.subscriptions, key = { "sub-" + it.id }) { podcast ->
@@ -112,7 +110,7 @@ fun LibraryScreen(
                     }
                 }
         } else if (state.error != null) {
-            item { LibraryStart(onImport, onRadio) }
+            item { LibraryStart(onImport) }
         }
         item { Column(Modifier.padding(bottom = 24.dp)) {} }
     }
@@ -125,15 +123,14 @@ private fun SectionHint(text: String) {
 }
 
 @Composable
-private fun LibraryStart(onImport: (() -> Unit)?, onRadio: (() -> Unit)?) {
+private fun LibraryStart(onImport: (() -> Unit)?) {
     Surface(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.secondaryContainer,
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("找点想听的", style = MaterialTheme.typography.titleMedium)
-            Text("通过 RSS 订阅播客，或打开电台收听直播。", style = MaterialTheme.typography.bodyMedium)
+            Text("通过公开 RSS 地址导入播客，订阅与单集保存在本机。", style = MaterialTheme.typography.bodyMedium)
             if (onImport != null) Button(onClick = onImport, modifier = Modifier.fillMaxWidth()) { Text("导入 RSS") }
-            if (onRadio != null) OutlinedButton(onClick = onRadio, modifier = Modifier.fillMaxWidth()) { Text("浏览电台") }
         }
     }
 }

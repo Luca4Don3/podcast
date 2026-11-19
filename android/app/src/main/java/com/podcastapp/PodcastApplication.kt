@@ -1,11 +1,6 @@
 package com.podcastapp
 
 import android.app.Application
-import com.podcastapp.data.ServiceLocator
 
-class PodcastApplication : Application() {
-    override fun onCreate() {
-        super.onCreate()
-        ServiceLocator.init(this)
-    }
-}
+/** Client-only application: no backend service or account session is initialized. */
+class PodcastApplication : Application()

@@ -3,6 +3,7 @@ package com.podcastapp.data.feed
 import android.content.Context
 import com.podcastapp.data.remote.EpisodeDto
 import com.podcastapp.data.remote.PodcastDto
+import com.podcastapp.data.remote.SettingsDto
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
@@ -26,6 +27,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 
 private const val LIBRARY_FILE = "local_podcast_library.json"
+private const val STATE_FILE = "local_podcast_state.json"
 private const val MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024
 private const val MAX_REDIRECTS = 5
 private const val USER_AGENT = "PodcastApp-LocalFeed/1.5"
@@ -45,6 +47,25 @@ data class LocalFeed(
     val podcast: PodcastDto,
     val episodes: List<EpisodeDto>,
     val importedAt: Long = 0L,
+)
+
+/** 单集在本机的播放进度；progress 以 episodeId 为 key。 */
+@Serializable
+data class LocalPlaybackProgress(
+    val episodeId: String,
+    val positionMs: Long,
+    val durationMs: Long,
+    val completed: Boolean,
+    val updatedAt: Long,
+)
+
+/** 播放器/收藏/待播与设置的纯本地状态，落盘到应用私有目录。 */
+@Serializable
+data class LocalLibraryState(
+    val progress: Map<String, LocalPlaybackProgress> = emptyMap(),
+    val starred: Set<String> = emptySet(),
+    val queued: Set<String> = emptySet(),
+    val settings: SettingsDto = SettingsDto(),
 )
 
 @Serializable
@@ -149,6 +170,11 @@ class LocalPodcastLibrary private constructor(
     private val _feeds = MutableStateFlow(readSnapshot())
     val feeds: StateFlow<List<LocalFeed>> = _feeds.asStateFlow()
 
+    private val stateFile = File(storageDir, STATE_FILE)
+    private val stateLock = Any()
+    private val _state = MutableStateFlow(readState())
+    val state: StateFlow<LocalLibraryState> = _state.asStateFlow()
+
     /** 导入单个 RSS/OPML 链接或 Apple 分享链接，返回本次新增/更新的订阅。 */
     suspend fun `import`(input: String): Result<List<LocalFeed>> = withContext(Dispatchers.IO) {
         mutex.withLock {
@@ -175,6 +201,30 @@ class LocalPodcastLibrary private constructor(
             _feeds.value = next
         }
     }
+
+    /** 记录单集播放进度；同一 episodeId 覆盖旧值。 */
+    fun recordProgress(episodeId: String, positionMs: Long, durationMs: Long, completed: Boolean) {
+        val progress = LocalPlaybackProgress(
+            episodeId = episodeId,
+            positionMs = positionMs,
+            durationMs = durationMs,
+            completed = completed,
+            updatedAt = System.currentTimeMillis(),
+        )
+        updateState { it.copy(progress = it.progress + (episodeId to progress)) }
+    }
+
+    fun setStarred(episodeId: String, starred: Boolean) = updateState { current ->
+        val next = if (starred) current.starred + episodeId else current.starred - episodeId
+        current.copy(starred = next)
+    }
+
+    fun setQueued(episodeId: String, queued: Boolean) = updateState { current ->
+        val next = if (queued) current.queued + episodeId else current.queued - episodeId
+        current.copy(queued = next)
+    }
+
+    fun saveSettings(next: SettingsDto) = updateState { it.copy(settings = next) }
 
     /** 用保存的公开 feed 地址重新拉取，保留原 ID、来源与首次导入时间。 */
     suspend fun refresh(id: String): Result<LocalFeed> = withContext(Dispatchers.IO) {
@@ -287,8 +337,53 @@ class LocalPodcastLibrary private constructor(
         }
     }
 
-    private companion object {
-        val httpClient: OkHttpClient = OkHttpClient.Builder()
+    private fun readState(): LocalLibraryState = runCatching {
+        if (!stateFile.exists()) LocalLibraryState()
+        else json.decodeFromString<LocalLibraryState>(stateFile.readText(Charsets.UTF_8))
+    }.getOrElse { LocalLibraryState() }
+
+    private fun persistState(next: LocalLibraryState) {
+        val text = json.encodeToString(next)
+        val temp = File(storageDir, STATE_FILE + ".tmp")
+        temp.writeText(text, Charsets.UTF_8)
+        if (!temp.renameTo(stateFile)) {
+            stateFile.writeText(text, Charsets.UTF_8)
+            temp.delete()
+        }
+    }
+
+    private fun updateState(transform: (LocalLibraryState) -> LocalLibraryState) = synchronized(stateLock) {
+        val next = transform(_state.value)
+        persistState(next)
+        _state.value = next
+    }
+
+    companion object {
+        @Volatile
+        private var instance: LocalPodcastLibrary? = null
+
+        /** 进程级单例，只持有 applicationContext，不访问网络或后端。 */
+        fun get(context: Context): LocalPodcastLibrary {
+            instance?.let { return it }
+            val appContext = context.applicationContext
+            return synchronized(this) {
+                instance ?: LocalPodcastLibrary(appContext.filesDir, Companion::fetchHttpText).also { instance = it }
+            }
+        }
+
+        /** 仅供 JVM 单测注入临时目录与假响应，复用与 get(context) 相同的单例逻辑。 */
+        internal fun getOrCreate(storageDir: File, fetchText: (String) -> String): LocalPodcastLibrary {
+            instance?.let { return it }
+            return synchronized(this) {
+                instance ?: LocalPodcastLibrary(storageDir, fetchText).also { instance = it }
+            }
+        }
+
+        internal fun resetForTest() {
+            synchronized(this) { instance = null }
+        }
+
+        private val httpClient: OkHttpClient = OkHttpClient.Builder()
             .followRedirects(false)
             .followSslRedirects(false)
             .connectTimeout(15, TimeUnit.SECONDS)

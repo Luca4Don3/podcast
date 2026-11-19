@@ -65,7 +65,7 @@ fun PodcastDetailScreen(
                 },
                 actions = {
                     IconButton(onClick = { viewModel.load(podcastId, forceRefresh = true) }) {
-                        Icon(Icons.Outlined.Refresh, contentDescription = "刷新单集")
+                        Icon(Icons.Outlined.Refresh, contentDescription = "刷新节目")
                     }
                 },
             )
@@ -100,7 +100,7 @@ fun PodcastDetailScreen(
                                         modifier = Modifier.size(18.dp),
                                     )
                                     Spacer(Modifier.width(6.dp))
-                                    Text(if (state.subscribed) "已订阅" else "订阅")
+                                    Text(if (state.subscribed) "取消订阅" else "重新订阅")
                                 }
                             }
                         }
@@ -115,7 +115,7 @@ fun PodcastDetailScreen(
                     }
                     Spacer(Modifier.height(8.dp))
                     if (state.episodes.isEmpty()) {
-                        EmptyState(title = "暂无单集", subtitle = "下拉或点击右上角刷新试试")
+                        EmptyState(title = "暂无单集", subtitle = "点击右上角刷新试试")
                     } else {
                         LazyColumn(Modifier.fillMaxSize()) {
                             items(state.episodes) { episode ->
