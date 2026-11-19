@@ -1,0 +1,44 @@
+name: windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'verify/windows-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Native Win32 x64 and ARM64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure x64
+        run: cmake -S windows -B windows/build-x64 -A x64
+      - name: Build x64
+        run: cmake --build windows/build-x64 --config Release --parallel 2
+      - name: Run Windows cache tests
+        run: ctest --test-dir windows/build-x64 -C Release --output-on-failure
+      - name: Configure ARM64 cross-build
+        run: cmake -S windows -B windows/build-arm64 -A ARM64
+      - name: Build ARM64
+        run: cmake --build windows/build-arm64 --config Release --parallel 2
+      - name: Check artifacts
+        shell: pwsh
+        run: |
+          $x64 = Get-Item windows/build-x64/Release/podcast.exe
+          $arm = Get-Item windows/build-arm64/Release/ARM64/podcast.exe
+          if (-not $x64 -or -not $arm) { throw 'missing executables' }
+          Write-Output "x64 $($x64.Length) bytes"
+          Write-Output "ARM64 $($arm.Length) bytes"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-w0-x64
+          path: windows/build-x64/Release/podcast.exe
+          if-no-files-found: error
