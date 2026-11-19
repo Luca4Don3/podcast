@@ -3,7 +3,7 @@ import Foundation
 import FoundationNetworking
 #endif
 import XCTest
-import PodcastKit
+@testable import PodcastKit
 
 final class APITests: XCTestCase {
     func testServerURLNormalizesHTTPSAndIsIdempotent() throws {
@@ -125,18 +125,41 @@ final class APITests: XCTestCase {
         }
     }
 
-    func testRedirectIsRejectedForPasswordAndBearer() async throws {
+    func testRedirectStatusAndLocationAreNotExposedAsSuccessOrErrorDetails() async throws {
         let marker = "redirect-fixture-marker"
-        let location = try XCTUnwrap(URL(string: "http://other.example.invalid/elsewhere?value=\(marker)"))
-        try await withAPI { request in
-            guard request.url?.host != location.host else {
-                XCTFail("Must not make any request to the redirect target")
-                return .response(500, "")
-            }
-            return .redirect(location)
+        try await withAPI { _ in
+            .response(307, marker, ["Location": "http://other.example.invalid/elsewhere?value=\(marker)"])
         } operation: { api in
             await self.assertError(.httpStatus(307), excluding: marker) { _ = try await api.login(email: "listener@example.invalid", password: marker) }
             await self.assertError(.httpStatus(307), excluding: marker) { _ = try await api.podcasts(token: marker) }
+        }
+    }
+
+    func testInstalledSessionDelegateRejectsEveryProposedRedirect() async throws {
+        // Exercise the actual delegate directly: custom URLProtocol redirects are not portable.
+        let origin = try XCTUnwrap(URL(string: "https://origin.example.invalid"))
+        let session = PodcastAPI(baseURL: origin).transport.session
+        defer { session.invalidateAndCancel() }
+        let delegate = try XCTUnwrap(session.delegate as? URLSessionTaskDelegate)
+        let task = session.dataTask(with: origin) // never resumed; no network traffic
+        for target in ["https://origin.example.invalid/other", "https://elsewhere.example.invalid", "http://origin.example.invalid"] {
+            let targetURL = try XCTUnwrap(URL(string: target))
+            let response = try XCTUnwrap(HTTPURLResponse(url: origin, statusCode: 307, httpVersion: "HTTP/1.1", headerFields: ["Location": target]))
+            var proposed = URLRequest(url: targetURL)
+            proposed.httpMethod = "POST"
+            proposed.httpBody = Data("fixture-password".utf8)
+            proposed.setValue("Bearer fixture-token", forHTTPHeaderField: "Authorization")
+            let decision = expectation(description: "Redirect delegate rejects the proposed request")
+            let reject: @Sendable (URLRequest?) -> Void = { request in
+                XCTAssertNil(request)
+                decision.fulfill()
+            }
+            #if canImport(FoundationNetworking)
+            delegate.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: proposed, completionHandler: reject)
+            #else
+            delegate.urlSession?(session, task: task, willPerformHTTPRedirection: response, newRequest: proposed, completionHandler: reject)
+            #endif
+            await fulfillment(of: [decision], timeout: 1)
         }
     }
 
@@ -188,8 +211,7 @@ final class APITests: XCTestCase {
 
 private final class StubProtocol: URLProtocol, @unchecked Sendable {
     enum Reply {
-        case response(Int, String)
-        case redirect(URL)
+        case response(Int, String, [String: String]? = nil)
     }
 
     typealias Responder = @Sendable (URLRequest) throws -> Reply
@@ -224,20 +246,10 @@ private final class StubProtocol: URLProtocol, @unchecked Sendable {
                 throw URLError(.unsupportedURL)
             }
             switch try responder(request) {
-            case .response(let code, let body):
-                let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: code, httpVersion: "HTTP/1.1", headerFields: nil))
+            case .response(let code, let body, let headers):
+                let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: code, httpVersion: "HTTP/1.1", headerFields: headers))
                 client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
                 client?.urlProtocol(self, didLoad: Data(body.utf8))
-            case .redirect(let location):
-                let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 307, httpVersion: "HTTP/1.1", headerFields: ["Location": location.absoluteString]))
-                #if canImport(FoundationNetworking)
-                // Corelibs Foundation does not support URLProtocolClient's redirect callback.
-                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-                #else
-                var redirected = request // Model a 307 that would preserve method, body and headers.
-                redirected.url = location
-                client?.urlProtocol(self, wasRedirectedTo: redirected, redirectResponse: response)
-                #endif
             }
             client?.urlProtocolDidFinishLoading(self)
         } catch {

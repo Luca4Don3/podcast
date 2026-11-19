@@ -57,7 +57,7 @@ public enum PodcastAPIError: LocalizedError, Equatable, Sendable {
 
 public struct PodcastAPI: Sendable {
     private let baseURL: URL?
-    private let transport: Transport
+    let transport: Transport
 
     /// An injected session supplies only trusted URLProtocol classes (for test doubles).
     /// The API owns its session and never adopts the caller's delegate or credential state.
@@ -191,7 +191,7 @@ public struct PodcastAPI: Sendable {
         let items: [Item]
     }
 
-    private final class Transport: Sendable {
+    final class Transport: Sendable {
         let session: URLSession
 
         init(protocolClasses: [AnyClass]?) {
