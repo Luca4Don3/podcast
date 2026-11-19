@@ -335,43 +335,29 @@ private final class FeedSessionDelegate: NSObject, URLSessionDelegate, URLSessio
     }
 
     private static func clientCredential(certPEM: String, keyPEM: String, password: String) -> URLCredential? {
+#if os(macOS)
         guard !certPEM.isEmpty, !keyPEM.isEmpty,
               let certificate = certificates(from: certPEM).first else { return nil }
-        var privateKey: SecKey?
-#if os(macOS)
         var parameters = SecItemImportExportKeyParameters(version: UInt32(0), flags: [],
             passphrase: password.isEmpty ? nil : Unmanaged.passUnretained(password as CFString),
             alertTitle: nil, alertPrompt: nil, accessRef: nil, keyUsage: nil, keyAttributes: nil)
         var imported: CFArray?
         let status = SecItemImport(Data(keyPEM.utf8) as CFData, nil, nil, nil, [], &parameters, nil, &imported)
-        if status == errSecSuccess, let keys = imported as? [SecKey] {
-            privateKey = keys.first
-        }
-#else
-        // iOS has no SecItemImport: accept an unencrypted PKCS#8 PEM key. Encrypted PEM
-        // keys require a server-provisioned PKCS#12 bundle via SecPKCS12Import.
-        if password.isEmpty,
-           let start = keyPEM.range(of: "-----BEGIN PRIVATE KEY-----"),
-           let finish = keyPEM.range(of: "-----END PRIVATE KEY-----", range: start.upperBound..<keyPEM.endIndex) {
-            let body = keyPEM[start.upperBound..<finish.lowerBound]
-            let base64 = body.split(whereSeparator: \.isNewline).map(String.init)
-                .map { $0.trimmingCharacters(in: .whitespaces) }.joined()
-            if let der = Data(base64Encoded: base64) {
-                for type in [kSecAttrKeyTypeRSA, kSecAttrKeyTypeECSECPrimeRandom] {
-                    let attributes: [CFString: Any] = [
-                        kSecAttrKeyType: type,
-                        kSecAttrKeyClass: kSecAttrKeyClassPrivate,
-                    ]
-                    if let key = SecKeyCreateWithData(der as CFData, attributes as CFDictionary, nil) {
-                        privateKey = key
-                        break
-                    }
-                }
-            }
-        }
-#endif
-        guard let privateKey, let identity = SecIdentityCreate(nil, certificate, privateKey) else { return nil }
+        guard status == errSecSuccess, let keys = imported as? [SecKey], let privateKey = keys.first,
+              let identity = SecIdentityCreate(nil, certificate, privateKey) else { return nil }
         return URLCredential(identity: identity, certificates: nil, persistence: .forSession)
+#else
+        // iOS cannot build a SecIdentity from a separate key and certificate. Accept a
+        // base64 PKCS#12 bundle (certificate + encrypted key) in the certificate field.
+        let trimmed = certPEM.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let p12 = Data(base64Encoded: trimmed), !p12.isEmpty else { return nil }
+        let options: [String: Any] = [kSecImportExportPassphrase as String: password]
+        var items: CFArray?
+        guard SecPKCS12Import(p12 as CFData, options as CFDictionary, &items) == errSecSuccess,
+              let imported = items as? [[String: Any]],
+              let identity = imported.first?[kSecImportItemIdentity as String] as? SecIdentity else { return nil }
+        return URLCredential(identity: identity, certificates: nil, persistence: .forSession)
+#endif
     }
 #endif
 }
@@ -777,7 +763,7 @@ private struct AddSourceView: View {
                         TextEditor(text: $caPEM).frame(minHeight: 60)
                             .font(.footnote.monospaced())
                     }
-                    inputRow("客户端证书 PEM") {
+                    inputRow("客户端证书 PEM / iOS PKCS#12 Base64") {
                         TextEditor(text: $clientCertPEM).frame(minHeight: 60)
                             .font(.footnote.monospaced())
                     }
