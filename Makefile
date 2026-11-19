@@ -1,43 +1,22 @@
-.PHONY: help build-cpp test-cpp run-cpp build-go test-go run-go android-build deploy-up deploy-down clean
+.PHONY: help android-test android-build apple-test apple-simulator clean
 
 help:
-	@echo "build-cpp     编译 C++ 后端（默认）"
-	@echo "test-cpp      运行 C++ 单元测试"
-	@echo "run-cpp       本地运行 C++ 后端"
-	@echo "build-go      编译 Go 后端（备选实现）"
-	@echo "test-go       运行 Go 后端测试"
-	@echo "run-go        本地运行 Go 后端"
-	@echo "android-build 编译 Debug APK"
-	@echo "deploy-up     用 docker compose 启动 api + caddy"
-	@echo "deploy-down   停止服务"
+	@echo "android-test     运行 Android JVM 单元测试"
+	@echo "android-build    导出 Android 通用包与 ABI 包"
+	@echo "apple-test       运行共享 Apple API 单元测试"
+	@echo "apple-simulator  构建 iPhone/iPad 通用模拟器包"
 
-build-cpp:
-	cmake -S server-cpp -B server-cpp/build -DCMAKE_BUILD_TYPE=Release
-	cmake --build server-cpp/build -j"$$(nproc)"
-
-test-cpp: build-cpp
-	./server-cpp/build/podcast-tests
-
-run-cpp: build-cpp
-	cd server-cpp && ./build/podcast-server -env-file .env
-
-build-go:
-	cd server && go build -trimpath -ldflags "-s -w" -o bin/podcast-server ./cmd/server
-
-test-go:
-	cd server && go test ./...
-
-run-go:
-	cd server && go run ./cmd/server
+android-test:
+	cd android && ./gradlew :app:testCompactUnitTest
 
 android-build:
-	cd android && ./gradlew :app:assembleDebug
+	cd android && ./gradlew :app:testCompactUnitTest :app:exportCompactApks
 
-deploy-up:
-	cd deploy && docker compose up -d --build
+apple-test:
+	swift test --package-path apple
 
-deploy-down:
-	cd deploy && docker compose down
+apple-simulator:
+	bash apple/build-simulator.sh output/apple
 
 clean:
-	rm -rf server-cpp/build server/bin dist
+	rm -rf android/app/build dist output/apple apple/.build

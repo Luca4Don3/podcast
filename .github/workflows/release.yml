@@ -75,94 +75,17 @@ jobs:
         timeout-minutes: 27
         run: bash apple/smoke-simulator.sh output/apple/DerivedData/Build/Products/Release-iphonesimulator/podcast.app
 
-  server-linux:
-    name: Server Linux x86_64
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y cmake libssl-dev libsqlite3-dev
-      - run: |
-          cmake -S server-cpp -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build -j"$(nproc)"
-          ctest --test-dir build --output-on-failure
-      - run: |
-          mkdir -p out
-          cp build/podcast-server out/podcast-server-linux-x86_64
-          sha256sum out/* > out/SHA256SUMS-linux
-      - uses: actions/upload-artifact@v4
-        with:
-          name: server-linux
-          path: out/
-          if-no-files-found: error
-
-  server-macos:
-    name: Server macOS (optional)
-    if: ${{ github.event_name == 'push' }}
-    runs-on: macos-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - run: brew install openssl@3 sqlite cmake
-      - run: |
-          cmake -S server-cpp -B build -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$(brew --prefix openssl@3);$(brew --prefix sqlite)" \
-            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
-          cmake --build build -j"$(sysctl -n hw.ncpu)"
-          ctest --test-dir build --output-on-failure
-      - run: |
-          mkdir -p out
-          cp build/podcast-server out/podcast-server-macos-x86_64
-          shasum -a 256 out/* > out/SHA256SUMS-macos
-      - uses: actions/upload-artifact@v4
-        with:
-          name: server-macos
-          path: out/
-          if-no-files-found: error
-
-  server-windows:
-    name: Server Windows (optional)
-    runs-on: windows-latest
-    continue-on-error: true
-    defaults:
-      run:
-        shell: msys2 {0}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-openssl
-            mingw-w64-x86_64-sqlite3
-      - run: |
-          cmake -S server-cpp -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build
-          ctest --test-dir build --output-on-failure
-      - run: |
-          mkdir -p out
-          cp build/podcast-server.exe out/podcast-server-windows-x86_64.exe
-          sha256sum out/* > out/SHA256SUMS-windows
-      - uses: actions/upload-artifact@v4
-        with:
-          name: server-windows
-          path: out/
-          if-no-files-found: error
-
   publish:
     name: Publish release
     if: github.ref_type == 'tag'
-    needs: [android, apple, server-linux]
+    needs: [android, apple]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: "{android,apple-simulator,server-linux}"
+          pattern: "{android,apple-simulator}"
       - name: Collect assets
         run: |
           python3 - <<'PY'
@@ -181,13 +104,9 @@ jobs:
                   continue
               seen.add(name)
               shutil.copy2(apk, out / name)
-          for binary in pathlib.Path("artifacts").glob("server-*/*"):
-              if binary.is_file() and not binary.name.startswith("SHA256SUMS"):
-                  shutil.copy2(binary, out / binary.name)
           apple = pathlib.Path("artifacts/apple-simulator") / f"podcast-{version}-ios-simulator.zip"
           shutil.copy2(apple, out / apple.name)
           assert (out / f"podcast-{version}.apk").is_file(), "universal Android APK missing"
-          assert (out / "podcast-server-linux-x86_64").is_file(), "Linux server missing"
           pathlib.Path("version.txt").write_text(version + "\n")
           print("\n".join(sorted(p.name for p in out.iterdir())))
           PY
@@ -206,4 +125,4 @@ jobs:
           if [[ "$version" == *-rc* ]]; then flags+=(--prerelease); fi
           gh release create "$tag" assets/* --verify-tag "${flags[@]}" \
             --title "podcast $version" \
-            --notes "Android phone/tablet APK (CI test signing), iPhone/iPad simulator app (not a device IPA), and Linux x86_64 server binary. Desktop clients are not included."
+            --notes "Client-only build: Android phone/tablet APK (CI test signing) and iPhone/iPad simulator app (not a device IPA). The app receives public podcast feeds and platform share links; no self-hosted server is required. Desktop clients are not included."
