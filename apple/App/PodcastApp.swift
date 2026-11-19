@@ -509,7 +509,7 @@ private final class LibrarySession: ObservableObject {
 
     private static let storageSelectionPrefix = "storage:"
 
-    private var selectedStorageSourceID: String? { storageSelection }
+    var selectedStorageSourceID: String? { storageSelection }
 
     private func storageSource(_ id: String) -> StoredNetworkSource? {
         storageSources.first { $0.id == id }
@@ -1297,7 +1297,7 @@ private struct LibraryView: View {
 @MainActor
 private struct AddNetworkStorageView: View {
     @ObservedObject var library: LibrarySession
-    @Environment(.dismiss) private var dismiss
+    @Environment(\.dismiss) private var dismiss
     @State private var provider: WebDavProvider = .webdav
     @State private var label = ""
     @State private var baseURL = ""
@@ -1881,9 +1881,9 @@ private final class EpisodePlayback: ObservableObject {
             status = "该音频文件没有可播放的地址。"
             return
         }
-        let asset = AVAsset(url: assetURL)
+        let asset = AVURLAsset(url: assetURL)
         let loader = StorageResourceLoader()
-        asset.resourceLoader.setDelegate(loader, queue: .global(qos: .userInitiated))
+        asset.resourceLoader.setDelegate(loader, queue: DispatchQueue.global(qos: DispatchQoS.QoSClass.userInitiated))
         // AVAssetResourceLoader.delegate is weak; keep the loader alive for this item.
         storageLoader = loader
         install(AVPlayerItem(asset: asset))
