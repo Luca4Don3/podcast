@@ -1,4 +1,7 @@
 import AVFoundation
+#if canImport(MediaPlayer)
+import MediaPlayer
+#endif
 import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -960,6 +963,9 @@ private final class EpisodePlayback: ObservableObject {
     private var positionObserver: Any?
     private var endObserver: NSObjectProtocol?
     private var failureObserver: NSObjectProtocol?
+    private var routeObserver: NSObjectProtocol?
+    private var interruptionObserver: NSObjectProtocol?
+    private var shouldResumeAfterInterruption = false
     private var audioSessionActive = false
 
     @Published private(set) var itemID = UUID()
@@ -970,6 +976,25 @@ private final class EpisodePlayback: ObservableObject {
     @Published private(set) var position = 0.0
     @Published private(set) var seekRange: ClosedRange<Double>?
     private var ended = false
+
+    init() {
+        routeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            Task { @MainActor [weak self] in self?.handleRouteChange(note) }
+        }
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            Task { @MainActor [weak self] in self?.handleInterruption(note) }
+        }
+        configureRemoteCommands()
+    }
+
+    deinit {
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+        if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
+    }
 
     func play(_ episode: StoredEpisode) {
         reset()
@@ -1027,6 +1052,7 @@ private final class EpisodePlayback: ObservableObject {
         player.pause()
         wantsPlayback = false
         deactivateAudioSession()
+        publishNowPlaying()
         update(id: itemID)
     }
 
@@ -1058,12 +1084,13 @@ private final class EpisodePlayback: ObservableObject {
         ended = false
         position = 0
         seekRange = nil
+        publishNowPlaying()
     }
 
     private func resume() {
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback)
+            try session.setCategory(.playback, mode: .spokenAudio, options: [])
             try session.setActive(true)
             audioSessionActive = true
             if ended {
@@ -1122,6 +1149,82 @@ private final class EpisodePlayback: ObservableObject {
             nextStatus = "正在载入音频…"
         }
         if status != nextStatus { status = nextStatus }
+        publishNowPlaying(item: item)
+    }
+
+    private func handleRouteChange(_ notification: Notification) {
+        guard let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? NSNumber,
+              AVAudioSession.RouteChangeReason(rawValue: raw.uintValue) == .oldDeviceUnavailable else { return }
+        if wantsPlayback {
+            pause()
+            status = "音频输出已断开，播放已暂停。"
+        }
+    }
+
+    private func handleInterruption(_ notification: Notification) {
+        guard let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? NSNumber,
+              let type = AVAudioSession.InterruptionType(rawValue: rawType.uintValue) else { return }
+        switch type {
+        case .began:
+            shouldResumeAfterInterruption = wantsPlayback
+            if wantsPlayback { pause() }
+        case .ended:
+            let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? NSNumber
+            let options = rawOptions.map { AVAudioSession.InterruptionOptions(rawValue: $0.uintValue) } ?? []
+            if shouldResumeAfterInterruption && options.contains(.shouldResume), canPlay {
+                resume()
+            }
+            shouldResumeAfterInterruption = false
+        @unknown default:
+            shouldResumeAfterInterruption = false
+        }
+    }
+
+    private func publishNowPlaying(item: AVPlayerItem? = nil) {
+#if canImport(MediaPlayer)
+        guard title != nil else {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            return
+        }
+        let source = item ?? player.currentItem
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: title ?? "",
+            MPNowPlayingInfoPropertyPlaybackRate: wantsPlayback ? 1.0 : 0.0,
+        ]
+        if let duration = source?.duration.seconds, duration.isFinite, duration > 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = duration
+        }
+        let elapsed = player.currentTime().seconds
+        if elapsed.isFinite, elapsed >= 0 { info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+#endif
+    }
+
+    private func configureRemoteCommands() {
+#if canImport(MediaPlayer)
+        let center = MPRemoteCommandCenter.shared()
+        center.playCommand.addTarget { [weak self] _ in
+            guard let self else { return MPRemoteCommandHandlerStatus.commandFailed }
+            Task { @MainActor in
+                guard self.canPlay, !self.wantsPlayback else { return }
+                self.resume()
+            }
+            return MPRemoteCommandHandlerStatus.success
+        }
+        center.pauseCommand.addTarget { [weak self] _ in
+            guard let self else { return MPRemoteCommandHandlerStatus.commandFailed }
+            Task { @MainActor in self.pause() }
+            return MPRemoteCommandHandlerStatus.success
+        }
+        center.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let self else { return MPRemoteCommandHandlerStatus.commandFailed }
+            Task { @MainActor in
+                guard self.canPlay else { return }
+                if self.wantsPlayback { self.pause() } else { self.resume() }
+            }
+            return MPRemoteCommandHandlerStatus.success
+        }
+#endif
     }
 }
 
