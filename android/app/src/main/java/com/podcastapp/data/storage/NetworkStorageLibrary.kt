@@ -28,7 +28,7 @@ private val CREDENTIAL_QUERY_KEYS = setOf("token", "api_key", "key")
 
 /** 网络存储来源类型。极空间只保存用户自己填写的已开启 WebDAV 的地址。 */
 @Serializable
-enum class StorageProvider { WEBDAV, JIANGUOYUN, ZSPACE, FEILIAN }
+enum class StorageProvider { WEBDAV, JIANGUOYUN, ZSPACE, FEILIAN, SMB }
 
 /**
  * 可持久化的来源元数据：这里只有非敏感字段，凭据/传输材料一律不进入本对象与落盘 JSON。
@@ -100,6 +100,7 @@ class NetworkStorageLibrary private constructor(
     ): Result<StorageSource> = withContext(Dispatchers.IO) {
         mutex.withLock {
             runCatching {
+                require(provider != StorageProvider.SMB)
                 val safeBaseUrl = normalizeBaseUrl(baseUrl, provider, transport)
                 val safeRootPath = rootPath.trim().trim('/')
                 val source = StorageSource(
@@ -110,15 +111,37 @@ class NetworkStorageLibrary private constructor(
                     rootPath = safeRootPath,
                 )
                 credentialStore.save(source.id, credentials, transport)
-                val byId = LinkedHashMap<String, StorageSource>()
-                _sources.value.forEach { byId[it.id] = it }
-                byId[source.id] = source
-                val next = byId.values.toList()
-                persist(next)
-                _sources.value = next
-                source
+                putSource(source)
             }.onFailure { if (it is CancellationException) throw it }
         }
+    }
+
+    internal suspend fun addSmb(label: String, address: String, path: String, credentials: SmbCredentials): Result<StorageSource> =
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                runCatching {
+                    val url = SmbLocation.parse(address).url
+                    val root = normalizeSmbRoot(path)
+                    credentials.validate()
+                    val id = storageSourceId(StorageProvider.SMB, url, root)
+                    credentialStore.saveSmb(id, credentials)
+                    putSource(StorageSource(id, StorageProvider.SMB, label.trim(), url, root))
+                }.onFailure { if (it is CancellationException) throw it }
+            }
+        }
+
+    internal fun smbClient(source: StorageSource): SmbClient {
+        require(source.provider == StorageProvider.SMB)
+        return SmbClient(SmbLocation.parse(source.baseUrl), source.rootPath, credentialStore.loadSmb(source.id))
+    }
+
+    private fun putSource(source: StorageSource): StorageSource {
+        val byId = _sources.value.associateByTo(LinkedHashMap()) { it.id }
+        byId[source.id] = source
+        val next = byId.values.toList()
+        persist(next)
+        _sources.value = next
+        return source
     }
 
     /** 删除来源并清理同 key 的凭据与传输材料。 */

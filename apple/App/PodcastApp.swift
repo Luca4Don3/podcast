@@ -136,6 +136,210 @@ private struct NetworkStorageStore {
     }
 }
 
+// MARK: - Direct SMB source (public metadata only)
+
+/// One SMB source. Only non-sensitive connection metadata is persisted; the password
+/// and account never enter this JSON file or LibrarySession/UI state.
+private struct StoredSMBSource: Codable, Identifiable, Equatable, Sendable {
+    let id: String
+    var label: String
+    var host: String
+    var port: Int
+    var share: String
+    var rootPath: String
+    var transport: SMBTransport
+
+    var endpoint: SMBEndpoint? { try? SMBEndpoint(host: host, port: port, share: share) }
+    var root: SMBPath? { try? SMBPath(relative: rootPath) }
+}
+
+/// Independent metadata file, separate from feeds and WebDAV storage.
+private struct SMBSourceStore {
+    let fileURL: URL
+
+    init(fileName: String = "podcast-smb-sources.json") {
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        fileURL = directory.appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    func load() -> [StoredSMBSource] {
+        guard let data = try? Data(contentsOf: fileURL) else { return [] }
+        return (try? JSONDecoder().decode([StoredSMBSource].self, from: data)) ?? []
+    }
+
+    func save(_ sources: [StoredSMBSource]) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(sources).write(to: fileURL, options: .atomic)
+    }
+}
+
+/// Credentials are keyed by source.id in the device Keychain (never in JSON).
+private enum SMBSecretStore {
+    private struct Secret: Codable { let user: String; let domain: String; let password: String }
+
+#if canImport(Security)
+    private static func query(for id: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: "com.podcastapp.smb-source-credentials.v1",
+         kSecAttrAccount as String: id,
+         kSecAttrSynchronizable as String: false]
+    }
+
+    static func load(for id: String) throws -> SMBCredentials {
+        var query = Self.query(for: id)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { throw SMBSourceError.missingCredentials }
+        guard status == errSecSuccess, let data = item as? Data,
+              let secret = try? JSONDecoder().decode(Secret.self, from: data) else {
+            throw SMBSourceError.credentialStore
+        }
+        return try SMBCredentials(user: secret.user, domain: secret.domain, password: secret.password)
+    }
+
+    static func save(_ credentials: SMBCredentials, for id: String) throws {
+        let base = Self.query(for: id)
+        let data = try JSONEncoder().encode(Secret(user: credentials.user, domain: credentials.domain,
+                                                    password: credentials.password))
+        let attributes: [String: Any] = [kSecValueData as String: data,
+                                         kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
+        var add = base
+        for (key, value) in attributes { add[key] = value }
+        let status = SecItemAdd(add as CFDictionary, nil)
+        guard status == errSecSuccess || status == errSecDuplicateItem else { throw SMBSourceError.credentialStore }
+        if status == errSecDuplicateItem {
+            guard SecItemUpdate(base as CFDictionary, attributes as CFDictionary) == errSecSuccess else {
+                throw SMBSourceError.credentialStore
+            }
+        }
+    }
+
+    static func remove(for id: String) {
+        _ = SecItemDelete(Self.query(for: id) as CFDictionary)
+    }
+#else
+    private static let lock = NSLock()
+    private static var memory: [String: SMBCredentials] = [:]
+
+    static func load(for id: String) throws -> SMBCredentials {
+        lock.lock(); defer { lock.unlock() }
+        guard let credentials = memory[id] else { throw SMBSourceError.missingCredentials }
+        return credentials
+    }
+
+    static func save(_ credentials: SMBCredentials, for id: String) throws {
+        lock.lock(); memory[id] = credentials; lock.unlock()
+    }
+
+    static func remove(for id: String) {
+        lock.lock(); memory.removeValue(forKey: id); lock.unlock()
+    }
+#endif
+}
+
+@MainActor
+private final class SMBStorageSession: ObservableObject {
+    @Published private(set) var sources: [StoredSMBSource] = []
+    @Published private(set) var entries: [SMBEntry] = []
+    @Published private(set) var path = ""
+    @Published private(set) var isBrowsing = false
+    @Published private(set) var error: String?
+
+    private let store = SMBSourceStore()
+
+    init() { sources = store.load() }
+
+    func source(_ id: String) -> StoredSMBSource? { sources.first { $0.id == id } }
+
+    /// Test the share with a real list request before persisting anything.
+    func add(_ source: StoredSMBSource, credentials: SMBCredentials) async throws {
+        guard !source.id.isEmpty, let endpoint = source.endpoint, let root = source.root else {
+            throw SMBSourceError.invalidSource
+        }
+        let client = try SMBClient(endpoint: endpoint, credentials: credentials, transport: source.transport)
+        _ = try await client.list(root)
+        try Task.checkCancellation()
+        try SMBSecretStore.save(credentials, for: source.id)
+        let updated = sources + [source]
+        do {
+            try store.save(updated)
+        } catch {
+            SMBSecretStore.remove(for: source.id)
+            throw error
+        }
+        sources = updated
+        error = nil
+    }
+
+    func remove(_ id: String) {
+        guard let source = source(id) else { return }
+        do {
+            try store.save(sources.filter { $0.id != id })
+            SMBSecretStore.remove(for: source.id)
+            sources.removeAll { $0.id == id }
+            error = nil
+        } catch {
+            self.error = SMBSourceError.credentialStore.localizedDescription
+        }
+    }
+
+    func reset() {
+        entries = []
+        path = ""
+        error = nil
+    }
+
+    static func join(_ base: String, _ child: String) -> String {
+        let parts = (base.isEmpty ? [] : base.split(separator: "/").map(String.init))
+            + (child.isEmpty ? [] : child.split(separator: "/").map(String.init))
+        return parts.joined(separator: "/")
+    }
+
+    func browse(sourceID: String, path target: String) async {
+        guard let source = source(sourceID), let root = source.root, let endpoint = source.endpoint else {
+            error = SMBSourceError.invalidSource.localizedDescription
+            return
+        }
+        isBrowsing = true
+        error = nil
+        defer { isBrowsing = false }
+        do {
+            guard let relative = try? SMBPath(relative: Self.join(root.wirePath, target)) else {
+                throw SMBSourceError.invalidPath
+            }
+            let credentials = try SMBSecretStore.load(for: source.id)
+            let client = try SMBClient(endpoint: endpoint, credentials: credentials, transport: source.transport)
+            let listed = try await client.list(relative)
+            try Task.checkCancellation()
+            entries = listed
+            path = target
+        } catch is CancellationError {
+            return
+        } catch {
+            entries = []
+            error = safeMessage(error, fallback: SMBSourceError.transport.localizedDescription)
+        }
+    }
+
+    func navigateUp(sourceID: String) {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        Task { @MainActor in await browse(sourceID: sourceID, path: parts.dropLast().joined(separator: "/")) }
+    }
+
+    func refresh(sourceID: String) {
+        Task { @MainActor in await browse(sourceID: sourceID, path: path) }
+    }
+
+    func open(_ entry: SMBEntry, sourceID: String) {
+        guard entry.isDirectory else { return }
+        Task { @MainActor in await browse(sourceID: sourceID, path: Self.join(path, entry.name)) }
+    }
+}
+
 // MARK: - Credential and transport storage (Keychain on Apple platforms, memory fallback elsewhere)
 
 /// Everything sensitive for one feed. Never part of the JSON subscription file.
@@ -498,7 +702,11 @@ private final class LibrarySession: ObservableObject {
     private let storageStore = NetworkStorageStore()
     let playback = EpisodePlayback()
     let oneDrive = OneDriveSession()
+    let smb = SMBStorageSession()
     static let oneDriveSelection = "provider:onedrive"
+    static let smbSelectionPrefix = "smb:"
+    @Published private(set) var smbSelection: String?
+    var selectedSMBSourceID: String? { smbSelection }
 
     var selectedFeed: StoredFeed? {
         feeds.first { $0.id == selection }
@@ -524,14 +732,24 @@ private final class LibrarySession: ObservableObject {
                 let sourceID = String(itemID.dropFirst(Self.storageSelectionPrefix.count))
                 guard storageSources.contains(where: { $0.id == sourceID }) else { return }
                 storageSelection = sourceID
+                smbSelection = nil
+            } else if itemID.hasPrefix(Self.smbSelectionPrefix) {
+                let sourceID = String(itemID.dropFirst(Self.smbSelectionPrefix.count))
+                guard smb.source(sourceID) != nil else { return }
+                storageSelection = nil
+                smbSelection = sourceID
+                smb.reset()
             } else if itemID == Self.oneDriveSelection {
                 storageSelection = nil
+                smbSelection = nil
             } else {
                 guard feeds.contains(where: { $0.id == itemID }) else { return }
                 storageSelection = nil
+                smbSelection = nil
             }
         } else {
             storageSelection = nil
+            smbSelection = nil
         }
         selection = itemID
         storagePath = ""
@@ -539,6 +757,8 @@ private final class LibrarySession: ObservableObject {
         storageError = nil
         if let id = selectedStorageSourceID {
             Task { @MainActor in await browseStorage(sourceID: id, path: "") }
+        } else if let id = smbSelection {
+            Task { @MainActor in await smb.browse(sourceID: id, path: "") }
         }
     }
 
@@ -702,6 +922,53 @@ private final class LibrarySession: ObservableObject {
         } catch {
             libraryError = "无法保存网络存储设置，请检查设备存储空间。"
         }
+    }
+
+    // MARK: - Direct SMB sources
+
+    @discardableResult
+    func addSMBSource(label: String, host: String, port: String, share: String, root: String,
+                      user: String, domain: String, password: String,
+                      transport: SMBTransport) async -> Bool {
+        do {
+            let cleanPort = port.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let portValue = Int(cleanPort), (1...65535).contains(portValue) else {
+                throw SMBSourceError.invalidSource
+            }
+            let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
+            let endpoint = try SMBEndpoint(host: host, port: portValue, share: share)
+            let path = try SMBPath(relative: root)
+            let credentials = try SMBCredentials(user: user, domain: domain, password: password)
+            let source = StoredSMBSource(id: UUID().uuidString, label: name.isEmpty ? endpoint.share : name,
+                                         host: endpoint.host, port: Int(endpoint.port), share: endpoint.share,
+                                         rootPath: path.wirePath, transport: transport)
+            try await smb.add(source, credentials: credentials)
+            try Task.checkCancellation()
+            smbSelection = source.id
+            storageSelection = nil
+            selection = Self.smbSelectionPrefix + source.id
+            await smb.browse(sourceID: source.id, path: "")
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            smb.error = safeMessage(error, fallback: SMBSourceError.invalidSource.localizedDescription)
+            return false
+        }
+    }
+
+    func removeSMBSource(_ id: String) {
+        smb.remove(id)
+        if smbSelection == id {
+            smbSelection = nil
+            selection = nil
+            smb.reset()
+        }
+    }
+
+    func playSMBEntry(_ entry: SMBEntry, sourceID: String) {
+        guard let source = smb.source(sourceID), smbSelection == sourceID else { return }
+        playback.playSMB(source: source, entry: entry, path: SMBStorageSession.join(smb.path, entry.name))
     }
 
     func play(_ episode: StoredEpisode, feedID: String) {
@@ -1141,6 +1408,7 @@ private struct LibraryView: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showingAddSource = false
     @State private var showingAddStorage = false
+    @State private var showingAddSMB = false
 
     private var selection: Binding<String?> {
         Binding(get: { library.selection }, set: { library.select($0) })
@@ -1161,6 +1429,9 @@ private struct LibraryView: View {
         }
         .sheet(isPresented: $showingAddStorage) {
             AddNetworkStorageView(library: library)
+        }
+        .sheet(isPresented: $showingAddSMB) {
+            AddSMBView(library: library)
         }
     }
 
@@ -1188,6 +1459,12 @@ private struct LibraryView: View {
                     Label("添加网络存储", systemImage: "externaldrive.badge.plus")
                 }
                 .accessibilityLabel("添加网络存储")
+                Button {
+                    showingAddSMB = true
+                } label: {
+                    Label("添加 SMB", systemImage: "externaldrive.connected.to.line.below.badge.plus")
+                }
+                .accessibilityLabel("添加 SMB")
             }
         }
     }
@@ -1221,6 +1498,20 @@ private struct LibraryView: View {
     @ViewBuilder
     private var storageRows: some View {
         Section("网络存储") {
+            ForEach(library.smb.sources) { source in
+                NavigationLink(value: "smb:" + source.id) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(source.label)
+                        Text("SMB 直连").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button(role: .destructive) { library.removeSMBSource(source.id) } label: {
+                        Label("移除来源", systemImage: "trash")
+                    }
+                }
+            }
             NavigationLink(value: LibrarySession.oneDriveSelection) {
                 Label("OneDrive", systemImage: "cloud")
             }
@@ -1246,6 +1537,8 @@ private struct LibraryView: View {
     private var detail: some View {
         if library.selection == LibrarySession.oneDriveSelection {
             OneDriveBrowserView(session: library.oneDrive, playback: library.playback)
+        } else if let sourceID = library.selectedSMBSourceID {
+            SMBBrowserView(library: library, sourceID: sourceID)
         } else if let sourceID = library.selectedStorageSourceID {
             StorageBrowserView(library: library, sourceID: sourceID)
         } else if let feed = library.selectedFeed {
@@ -1697,6 +1990,211 @@ private struct StorageBrowserView: View {
     }
 }
 
+// MARK: - Add direct SMB source
+
+@MainActor
+private struct AddSMBView: View {
+    @ObservedObject var library: LibrarySession
+    @Environment(\.dismiss) private var dismiss
+    @State private var label = ""
+    @State private var host = ""
+    @State private var port = "445"
+    @State private var share = ""
+    @State private var root = ""
+    @State private var username = ""
+    @State private var domain = ""
+    @State private var password = ""
+    @State private var transport: SMBTransport = .encrypted
+    @State private var busy = false
+    @FocusState private var focused: Field?
+
+    private enum Field: Hashable { case label, host, port, share, root, username, domain, password }
+
+    private func submit() {
+        guard !busy else { return }
+        focused = nil
+        let secret = password
+        password = ""
+        Task { @MainActor in
+            busy = true
+            defer { busy = false }
+            if await library.addSMBSource(label: label, host: host, port: port, share: share, root: root,
+                                          user: username, domain: domain, password: secret,
+                                          transport: transport) {
+                dismiss()
+            }
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("SMB 2/3 直连（只读）") {
+                    inputRow("显示名") { TextField("例如：家庭 NAS", text: $label).focused($focused, equals: .label) }
+                    inputRow("主机") {
+                        TextField("nas.local", text: $host)
+                            .keyboardType(.URL).textContentType(.URL)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .focused($focused, equals: .host)
+                    }
+                    inputRow("TCP 端口") { TextField("445", text: $port).keyboardType(.numberPad).focused($focused, equals: .port) }
+                    inputRow("共享名") {
+                        TextField("Podcasts", text: $share)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .focused($focused, equals: .share)
+                    }
+                    inputRow("根目录（可选）") {
+                        TextField("播客/访谈", text: $root)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .focused($focused, equals: .root)
+                    }
+                }
+                .disabled(busy)
+                Section("只读账户") {
+                    inputRow("用户名") {
+                        TextField("用户名", text: $username)
+                            .textContentType(.username)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .focused($focused, equals: .username)
+                    }
+                    inputRow("域 / 工作组（可选）") {
+                        TextField("WORKGROUP", text: $domain)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .focused($focused, equals: .domain)
+                    }
+                    inputRow("密码") {
+                        SecureField("密码", text: $password)
+                            .textContentType(.password)
+                            .focused($focused, equals: .password)
+                            .submitLabel(.done).onSubmit(submit)
+                    }
+                }
+                .disabled(busy)
+                Section("传输策略") {
+                    Picker("SMB 传输", selection: $transport) {
+                        Text("要求 SMB3 加密（推荐）").tag(SMBTransport.encrypted)
+                        Text("要求 SMB2/3 签名").tag(SMBTransport.signed)
+                        Text("仅 TLS（不兼容直连）").tag(SMBTransport.tlsOnly)
+                    }
+                    if transport == .tlsOnly {
+                        Text("仅 TLS 不兼容 SMB 直连：签名和 SMB3 加密都不是 TLS。请改选加密或签名。")
+                            .font(.footnote).foregroundStyle(.red)
+                    } else {
+                        Text("签名保护完整性但不加密；请仅在受信任局域网或 VPN 使用专用只读账户。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(busy)
+                Section {
+                    if busy {
+                        ProgressView("正在验证共享…")
+                    } else {
+                        Button("测试并添加 SMB", action: submit)
+                            .disabled(transport == .tlsOnly || host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                                      share.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                                      username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                                      password.isEmpty)
+                    }
+                    if let message = library.smb.error { Text(message).foregroundStyle(.secondary) }
+                }
+                DisclosureGroup("隐私说明") {
+                    Text("显示名、主机、端口、共享名和根目录保存在独立的本机 JSON 文件；用户名、域和密码按来源 ID 存入本机钥匙串，不同步到 iCloud。真实文件地址不会写入 JSON 或播放器状态。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("完成") { focused = nil }
+                }
+            }
+            .navigationTitle("添加 SMB")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+            }
+        }
+        .onDisappear { password = "" }
+    }
+
+    private func inputRow<Content: View>(_ title: LocalizedStringKey,
+                                         @ViewBuilder field: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.subheadline.weight(.medium))
+                .fixedSize(horizontal: false, vertical: true).accessibilityHidden(true)
+            field().labelsHidden().frame(minHeight: 44)
+        }
+    }
+}
+
+// MARK: - Direct SMB browser
+
+@MainActor
+private struct SMBBrowserView: View {
+    @ObservedObject var library: LibrarySession
+    let sourceID: String
+
+    private var source: StoredSMBSource? { library.smb.source(sourceID) }
+
+    var body: some View {
+        List {
+            if source != nil {
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: "folder")
+                        Text("当前目录：/\(library.smb.path)")
+                            .font(.footnote).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack(spacing: 16) {
+                        Button { library.smb.navigateUp(sourceID: sourceID) } label: {
+                            Label("返回上级", systemImage: "arrow.up")
+                        }
+                        .disabled(library.smb.path.isEmpty || library.smb.isBrowsing)
+                        Button { library.smb.refresh(sourceID: sourceID) } label: {
+                            Label("刷新", systemImage: "arrow.clockwise")
+                        }
+                        .disabled(library.smb.isBrowsing)
+                    }
+                }
+                Section("内容") {
+                    if library.smb.isBrowsing { ProgressView("正在读取 SMB 目录…") }
+                    if let message = library.smb.error {
+                        Text(message).font(.footnote).foregroundStyle(.secondary)
+                    }
+                    if !library.smb.isBrowsing && library.smb.entries.isEmpty && library.smb.error == nil {
+                        Text("该目录为空。").foregroundStyle(.secondary)
+                    }
+                    ForEach(library.smb.entries) { entry in
+                        if entry.isDirectory {
+                            Button { library.smb.open(entry, sourceID: sourceID) } label: {
+                                Label(entry.name, systemImage: "folder")
+                            }
+                            .disabled(library.smb.isBrowsing)
+                        } else if entry.audioExtension != nil {
+                            Button { library.playSMBEntry(entry, sourceID: sourceID) } label: {
+                                Label(entry.name, systemImage: "play.circle")
+                            }
+                        } else {
+                            Label(entry.name, systemImage: "doc").foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Section {
+                    Text("SMB 只读访问。凭据仅存本机钥匙串；音频按 Range 分块读取，不写入订阅或 JSON。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .navigationTitle(source?.label ?? "SMB")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            if library.smbSelectedSourceID != sourceID { library.select("smb:" + sourceID) }
+        }
+    }
+}
+
 // MARK: - Network storage playback bridge
 
 /// Custom scheme only. The host carries the source id and the path is base64url encoded,
@@ -1890,6 +2388,139 @@ private final class StorageResourceLoader: NSObject, AVAssetResourceLoaderDelega
     }
 }
 
+// MARK: - Direct SMB playback bridge
+
+/// Opaque custom-scheme URL: host is only the source id, the path is base64url encoded.
+/// No real host, share, file URL or credential is exposed to AVPlayer or UI state.
+private enum SMBPlaybackURL {
+    static let scheme = "podcast-smb"
+    private static let allowedSourceID = CharacterSet(
+        charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+
+    static func make(sourceID: String, path: String) -> URL? {
+        guard !sourceID.isEmpty, !path.isEmpty,
+              sourceID.rangeOfCharacter(from: allowedSourceID.inverted) == nil else { return nil }
+        let encoded = Data(path.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = sourceID.lowercased()
+        components.path = "/" + encoded
+        return components.url
+    }
+
+    static func parse(_ url: URL) -> (sourceID: String, path: String)? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == scheme,
+              let host = components.host, !host.isEmpty,
+              host.rangeOfCharacter(from: allowedSourceID.inverted) == nil else { return nil }
+        var raw = String(components.path.dropFirst())
+        guard !raw.isEmpty else { return nil }
+        raw = raw.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        let remainder = raw.count % 4
+        if remainder != 0 { raw += String(repeating: "=", count: 4 - remainder) }
+        guard let data = Data(base64Encoded: raw),
+              let path = String(data: data, encoding: .utf8), !path.isEmpty else { return nil }
+        return (host, path)
+    }
+}
+
+/// Independent delegate: the WebDAV loader speaks HTTP only and cannot be reused for SMB.
+/// It opens an SMBReadHandle and serves bounded, offset-based Range reads via SMBByteRange.
+private final class SMBResourceLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var tasks: [ObjectIdentifier: Task<Void, Never>] = [:]
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        guard let url = loadingRequest.request.url, let target = SMBPlaybackURL.parse(url) else { return false }
+        let key = ObjectIdentifier(loadingRequest)
+        let task = Task { [weak self] in
+            await self?.fulfill(target, request: loadingRequest)
+            self?.forget(key)
+        }
+        lock.lock(); tasks[key] = task; lock.unlock()
+        return true
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        didCancel loadingRequest: AVAssetResourceLoadingRequest) {
+        let key = ObjectIdentifier(loadingRequest)
+        lock.lock(); let task = tasks.removeValue(forKey: key); lock.unlock()
+        task?.cancel()
+    }
+
+    private func forget(_ key: ObjectIdentifier) {
+        lock.lock(); tasks.removeValue(forKey: key); lock.unlock()
+    }
+
+    private static func mimeType(for name: String) -> String {
+        switch (name as NSString).pathExtension.lowercased() {
+        case "m4a", "aac", "mp4": return "audio/mp4"
+        case "mp3": return "audio/mpeg"
+        case "wav": return "audio/wav"
+        case "flac": return "audio/flac"
+        case "aiff", "aif": return "audio/aiff"
+        case "caf": return "audio/x-caf"
+        default: return "application/octet-stream"
+        }
+    }
+
+    private func fulfill(_ target: (sourceID: String, path: String),
+                         request: AVAssetResourceLoadingRequest) async {
+        do {
+            try Task.checkCancellation()
+            guard let source = SMBSourceStore().load().first(where: { $0.id == target.sourceID }),
+                  let endpoint = source.endpoint,
+                  let relative = try? SMBPath(relative: SMBStorageSession.join(source.rootPath, target.path)) else {
+                throw SMBSourceError.invalidSource
+            }
+            let credentials = try SMBSecretStore.load(for: source.id)
+            let client = try SMBClient(endpoint: endpoint, credentials: credentials, transport: source.transport)
+            let handle = try await client.open(relative)
+            try Task.checkCancellation()
+            let size = handle.size
+
+            if let info = request.contentInformationRequest {
+                info.isByteRangeAccessSupported = true
+                info.contentType = Self.mimeType(for: relative.wirePath)
+                info.contentLength = size
+            }
+            guard let dataRequest = request.dataRequest else {
+                request.finishLoading()
+                return
+            }
+            let offset = dataRequest.requestedOffset
+            guard offset >= 0 else { throw SMBSourceError.invalidRange }
+            let requested = Int64(dataRequest.requestedLength)
+            let end = dataRequest.requestsAllDataToEndOfResource ? size : min(size, offset + requested)
+            // Cap each response; AVPlayer re-requests the next Range from the same handle task.
+            let stop = min(end, offset + 2 * 1024 * 1024)
+            var data = Data()
+            var cursor = offset
+            while cursor < stop {
+                try Task.checkCancellation()
+                let range = try SMBByteRange.resolve(
+                    requestedOffset: cursor, currentOffset: cursor,
+                    length: Int(min(stop - cursor, Int64(Int.max))),
+                    throughEOF: false, size: size)
+                let chunk = try await handle.read(SMBByteRange.chunk(range))
+                guard !chunk.isEmpty else { throw SMBSourceError.fileChanged }
+                data.append(chunk)
+                cursor += Int64(chunk.count)
+            }
+            try Task.checkCancellation()
+            dataRequest.respond(with: data)
+            request.finishLoading()
+        } catch {
+            if error is CancellationError { request.finishLoading() }
+            else { request.finishLoading(with: error) }
+        }
+    }
+}
+
 // MARK: - Playback (AVPlayer; HTTPS-only enclosure check is unchanged)
 
 @MainActor
@@ -1904,6 +2535,7 @@ private final class EpisodePlayback: ObservableObject {
     private var routeObserver: NSObjectProtocol?
     private var interruptionObserver: NSObjectProtocol?
     private var storageLoader: StorageResourceLoader?
+    private var smbLoader: SMBResourceLoader?
     private var isOneDriveItem = false
     private var shouldResumeAfterInterruption = false
     private var audioSessionActive = false
@@ -1962,6 +2594,23 @@ private final class EpisodePlayback: ObservableObject {
         asset.resourceLoader.setDelegate(loader, queue: DispatchQueue.global(qos: DispatchQoS.QoSClass.userInitiated))
         // AVAssetResourceLoader.delegate is weak; keep the loader alive for this item.
         storageLoader = loader
+        install(AVPlayerItem(asset: asset))
+    }
+
+    /// SMB playback uses an opaque URL; the endpoint and credentials are resolved inside
+    /// SMBResourceLoader only, and audio is served by bounded SMBReadHandle Range reads.
+    func playSMB(source: StoredSMBSource, entry: SMBEntry, path: String) {
+        reset()
+        title = entry.name
+        guard let assetURL = SMBPlaybackURL.make(sourceID: source.id, path: path) else {
+            status = "该音频文件没有可播放的地址。"
+            return
+        }
+        let asset = AVURLAsset(url: assetURL)
+        let loader = SMBResourceLoader()
+        asset.resourceLoader.setDelegate(loader, queue: DispatchQueue.global(qos: DispatchQoS.QoSClass.userInitiated))
+        // AVAssetResourceLoader.delegate is weak; keep the loader alive for this item.
+        smbLoader = loader
         install(AVPlayerItem(asset: asset))
     }
 
@@ -2049,6 +2698,7 @@ private final class EpisodePlayback: ObservableObject {
         player.currentItem?.cancelPendingSeeks()
         player.replaceCurrentItem(with: nil)
         storageLoader = nil
+        smbLoader = nil
         isOneDriveItem = false
         deactivateAudioSession()
         title = nil

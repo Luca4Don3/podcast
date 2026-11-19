@@ -7,6 +7,10 @@ on:
         description: Install and launch on representative small and large iPhone and iPad simulators
         type: boolean
         default: false
+      smb_fixture_test:
+        description: Verify read-only SMB against an isolated loopback Samba fixture
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -36,6 +40,11 @@ jobs:
       - name: Test and export APKs
         working-directory: android
         run: ./gradlew --no-daemon :app:testCompactUnitTest :app:exportCompactApks
+      - name: Check SMB with loopback Samba
+        if: inputs.smb_fixture_test == true
+        timeout-minutes: 10
+        working-directory: android
+        run: bash ../tests/run-smb-fixture.sh -- ./gradlew --no-daemon :app:testCompactUnitTest --tests "*SmbFixtureTest"
       - name: Check large-screen support
         run: |
           python3 - <<'PY'

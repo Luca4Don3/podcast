@@ -4,12 +4,14 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.podcastapp.data.storage.SmbCredentials
 
 private const val PREFS_NAME = "podcast_source_credentials"
 private const val KEY_KIND = ".kind"
 private const val KEY_USERNAME = ".username"
 private const val KEY_SECRET = ".secret"
 private const val KEY_HEADER = ".header"
+private const val KEY_SMB_DOMAIN = ".smbDomain"
 private const val KEY_REQUIRE_HTTPS = ".transport.requireHttps"
 private const val KEY_CUSTOM_CA = ".transport.customCaPem"
 private const val KEY_CLIENT_CERT = ".transport.clientCertPem"
@@ -92,7 +94,20 @@ class SourceCredentialStore internal constructor(private val storage: Credential
         digest = storage.getString(feedId + KEY_DIGEST)?.toBooleanStrictOrNull() ?: false,
     )
 
+    internal fun saveSmb(id: String, credentials: SmbCredentials) {
+        storage.putString(id + KEY_USERNAME, credentials.username)
+        storage.putString(id + KEY_SECRET, credentials.password)
+        storage.putString(id + KEY_SMB_DOMAIN, credentials.domain)
+    }
+
+    internal fun loadSmb(id: String) = SmbCredentials(
+        storage.getString(id + KEY_USERNAME).orEmpty(),
+        storage.getString(id + KEY_SECRET).orEmpty(),
+        storage.getString(id + KEY_SMB_DOMAIN).orEmpty(),
+    )
+
     fun remove(feedId: String) {
+        storage.remove(feedId + KEY_SMB_DOMAIN)
         storage.remove(feedId + KEY_KIND)
         storage.remove(feedId + KEY_USERNAME)
         storage.remove(feedId + KEY_SECRET)

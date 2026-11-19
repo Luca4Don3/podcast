@@ -2,7 +2,7 @@
 
 参考 Apple Podcasts 的信息架构与交互，面向 Android、iPhone 和 iPad 的播客接收与播放客户端。应用直接读取公开 RSS/Atom、OPML 和平台分享链接；**不再要求自建后端，也不作为播客分发平台**。
 
-公开仓库：<https://github.com/Luca4Don3/podcast>。当前开发版本：1.7.0（client-only，尚未发布到 GitHub Release）。
+公开仓库：<https://github.com/Luca4Don3/podcast>。当前开发版本：1.8.0（client-only，尚未发布到 GitHub Release）。
 
 新版本 tag 仅构建 Android 手机／平板包和 iPhone／iPad 模拟器包；历史 Release 不覆盖。Apple 真机包仍需自己的签名。
 

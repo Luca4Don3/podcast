@@ -21,6 +21,8 @@ import com.podcastapp.data.remote.EpisodeDto
 import com.podcastapp.data.remote.StationDto
 import com.podcastapp.data.storage.OneDriveDownloads
 import com.podcastapp.data.storage.OneDrivePlaybackFactory
+import com.podcastapp.data.storage.SmbClient
+import com.podcastapp.data.storage.SmbPlaybackFactory
 import com.podcastapp.data.storage.StoragePlaybackFactory
 import com.podcastapp.data.storage.StorageMedia
 import com.podcastapp.data.storage.StorageStreamFactory
@@ -309,6 +311,17 @@ object PlaybackHolder {
     @OptIn(UnstableApi::class)
     internal fun playOneDrive(context: Context, name: String, mime: String?, downloads: OneDriveDownloads) {
         playStorageStream(context, name, mime, "OneDrive") { uri -> OneDrivePlaybackFactory(downloads, uri) }
+    }
+
+    @OptIn(UnstableApi::class)
+    internal fun playSmb(context: Context, sourceId: String, name: String, mime: String?, client: SmbClient, path: String) {
+        playStorageStream(context, name, mime, "SMB") { uri -> client.playbackFactory(sourceId, uri, path) }
+    }
+
+    internal fun stopSmb(sourceId: String) {
+        if ((storageStreamFactory as? SmbPlaybackFactory)?.sourceId != sourceId) return
+        clearFilePlayback()
+        player?.clearMediaItems()
     }
 
     internal fun stopOneDrive() {
