@@ -99,7 +99,7 @@ int wmain() {
     CHECK(podcast_cache_prune(utf8_dir.c_str(), "../outside") == -1);
     CHECK(podcast_cache_file_size(utf8_dir.c_str(), b.c_str()) == 6);
     const int removed = podcast_cache_prune(utf8_dir.c_str(), a.c_str());
-    CHECK(removed == 2); // b and the orphan .part; the unrelated text file stays.
+    CHECK(removed == 1); // Only b; unrelated.txt and a non-cache .part are left untouched.
     CHECK(podcast_cache_file_size(utf8_dir.c_str(), a.c_str()) == 3);
     CHECK(podcast_cache_file_size(utf8_dir.c_str(), b.c_str()) == 0);
     CHECK(exists(utf8_to_wide(wide_to_utf8(dir) + "\\unrelated.txt")));
