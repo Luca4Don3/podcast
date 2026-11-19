@@ -41,3 +41,10 @@ __pycache__/
 *.p12
 .env.*
 !.env.example
+
+# Apple build outputs
+apple/.build/
+apple/.swiftpm/
+apple/**/xcuserdata/
+*.xcuserstate
+/output/

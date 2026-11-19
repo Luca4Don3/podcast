@@ -29,6 +29,6 @@ C++ 构建时启用 PODCAST_ENABLE_WEBDAV=ON，需要 libcurl 7.62+ 和 libxml2 
 
 ## 平台构建现状
 
-- Android 手机与平板共用同一包，已验证通过 GitHub Actions 构建并导出通用包及四种 ABI 包。
+- Android 手机与平板共用同一包，已在 GitHub Actions 成功构建并导出通用包及四种 ABI 包。
 - 自托管后端：Linux x86_64 在 CI 中构建成功。macOS 与 Windows 后端尚无成功构建记录：macOS 因托管 runner 容量不足被取消，Windows 存在 POSIX 时间与 socket API 依赖，尚未完成移植。
-- Linux、Windows、macOS、iOS 的**客户端**尚无源码。仓库当前只提供 Android 客户端；请勿把服务器二进制当作桌面客户端。
+- 另有 [iPhone／iPad 客户端](<APPLE_CLIENT.md>)，当前不提供文件音源浏览；Linux、Windows、macOS 桌面播放器尚未交付。服务器二进制不是桌面客户端。

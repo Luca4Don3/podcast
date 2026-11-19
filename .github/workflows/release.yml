@@ -48,6 +48,24 @@ jobs:
           path: android/app/build/outputs/podcast/compact/**/podcast-*.apk
           if-no-files-found: error
 
+  apple:
+    name: iPhone and iPad simulator
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test shared API
+        run: swift test --package-path apple
+      - name: Build and check the universal simulator app
+        run: bash apple/build-simulator.sh output/apple
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-simulator
+          path: output/apple/podcast-*-ios-simulator.zip
+          if-no-files-found: error
+
   server-linux:
     name: Server Linux x86_64
     runs-on: ubuntu-latest
@@ -127,20 +145,23 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [android, server-linux]
+    if: github.ref_type == 'tag'
+    needs: [android, apple, server-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: "{android,apple-simulator,server-linux}"
       - name: Collect assets
         run: |
           python3 - <<'PY'
-          import pathlib, shutil
+          import os, pathlib, shutil
           version = next(line.split('"')[1] for line in
               pathlib.Path("android/app/build.gradle.kts").read_text().splitlines()
               if line.startswith("val podcastVersion ="))
+          assert os.environ["GITHUB_REF_NAME"] == "v" + version, "tag/version mismatch"
           out = pathlib.Path("assets"); out.mkdir()
           seen = set()
           for apk in sorted(pathlib.Path("artifacts/android").rglob("podcast-*.apk")):
@@ -154,6 +175,10 @@ jobs:
           for binary in pathlib.Path("artifacts").glob("server-*/*"):
               if binary.is_file() and not binary.name.startswith("SHA256SUMS"):
                   shutil.copy2(binary, out / binary.name)
+          apple = pathlib.Path("artifacts/apple-simulator") / f"podcast-{version}-ios-simulator.zip"
+          shutil.copy2(apple, out / apple.name)
+          assert (out / f"podcast-{version}.apk").is_file(), "universal Android APK missing"
+          assert (out / "podcast-server-linux-x86_64").is_file(), "Linux server missing"
           pathlib.Path("version.txt").write_text(version + "\n")
           print("\n".join(sorted(p.name for p in out.iterdir())))
           PY
@@ -167,7 +192,9 @@ jobs:
             echo "::warning::Release $tag already exists; refusing to overwrite published assets. Bump podcastVersion to publish a new release."
             exit 0
           fi
-          gh release create "$tag" \
+          (cd assets && sha256sum -- * > SHA256SUMS)
+          flags=()
+          if [[ "$version" == *-rc* ]]; then flags+=(--prerelease); fi
+          gh release create "$tag" assets/* --verify-tag "${flags[@]}" \
             --title "podcast $version" \
-            --notes "Android phone/tablet APK (CI debug signing) and Linux x86_64 server binary. Desktop and iOS clients are not implemented yet."
-          gh release upload "$tag" assets/*
+            --notes "Android phone/tablet APK (CI test signing), iPhone/iPad simulator app (not a device IPA), and Linux x86_64 server binary. Desktop clients are not included."
