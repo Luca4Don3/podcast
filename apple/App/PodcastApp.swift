@@ -7,7 +7,7 @@ import SwiftUI
 @MainActor
 struct PodcastApp: App {
     @StateObject private var library = LibrarySession()
-    @Environment(.scenePhase) private var scenePhase
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -234,63 +234,84 @@ private struct LibraryView: View {
     @ObservedObject var library: LibrarySession
     let accountID: UUID
 
+    private var selection: Binding<String?> {
+        Binding(get: { library.selection }, set: { library.select($0, accountID: accountID) })
+    }
+
     var body: some View {
         NavigationSplitView {
-            List(selection: Binding(get: { library.selection }, set: { library.select($0, accountID: accountID) })) {
-                switch library.subscriptions {
-                case .loading:
-                    ProgressView("正在读取订阅…")
-                case .failed(let message):
-                    RetryRow(message: message) { library.loadSubscriptions(accountID: accountID) }
-                case .loaded(let podcasts):
-                    if podcasts.isEmpty { Text("没有订阅").foregroundStyle(.secondary) }
-                    ForEach(podcasts, id: .id) { podcast in
-                        NavigationLink(value: podcast.id) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(podcast.title)
-                                if !podcast.author.isEmpty {
-                                    Text(podcast.author).font(.subheadline).foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            .listStyle(.sidebar)
-            .navigationTitle("订阅")
-            .toolbar { signOutButton }
+            sidebar
         } detail: {
-            if let podcast = library.selectedPodcast {
-                List {
-                    switch library.episodes {
-                    case .loading:
-                        ProgressView("正在读取单集…")
-                    case .failed(let message):
-                        RetryRow(message: message) { library.loadEpisodes(podcastID: podcast.id, accountID: accountID) }
-                    case .loaded(let episodes):
-                        if episodes.isEmpty { Text("没有单集").foregroundStyle(.secondary) }
-                        ForEach(episodes, id: .id) { episode in
-                            Button {
-                                library.play(episodeID: episode.id, podcastID: podcast.id, accountID: accountID)
-                            } label: {
-                                Label(episode.title, systemImage: "play.circle")
-                            }
-                            .disabled(episode.audioUrl.isEmpty)
-                        }
-                    }
-                }
-                .navigationTitle(podcast.title)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar { signOutButton }
-            } else {
-                Text("选择一个订阅以查看单集")
-                    .foregroundStyle(.secondary)
-                    .navigationTitle("单集")
-            }
+            detail
         }
         .navigationSplitViewStyle(.balanced)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             PlaybackBar(playback: library.playback)
+        }
+    }
+
+    private var sidebar: some View {
+        List(selection: selection) {
+            subscriptionRows
+        }
+        .listStyle(.sidebar)
+        .navigationTitle("订阅")
+        .toolbar { signOutButton }
+    }
+
+    @ViewBuilder
+    private var subscriptionRows: some View {
+        switch library.subscriptions {
+        case .loading:
+            ProgressView("正在读取订阅…")
+        case .failed(let message):
+            RetryRow(message: message) { library.loadSubscriptions(accountID: accountID) }
+        case .loaded(let podcasts):
+            if podcasts.isEmpty { Text("没有订阅").foregroundStyle(.secondary) }
+            ForEach(podcasts) { podcast in
+                NavigationLink(value: podcast.id) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(podcast.title)
+                        if !podcast.author.isEmpty {
+                            Text(podcast.author).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        if let podcast = library.selectedPodcast {
+            List { episodeRows(podcastID: podcast.id) }
+                .navigationTitle(podcast.title)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { signOutButton }
+        } else {
+            Text("选择一个订阅以查看单集")
+                .foregroundStyle(.secondary)
+                .navigationTitle("单集")
+        }
+    }
+
+    @ViewBuilder
+    private func episodeRows(podcastID: String) -> some View {
+        switch library.episodes {
+        case .loading:
+            ProgressView("正在读取单集…")
+        case .failed(let message):
+            RetryRow(message: message) { library.loadEpisodes(podcastID: podcastID, accountID: accountID) }
+        case .loaded(let episodes):
+            if episodes.isEmpty { Text("没有单集").foregroundStyle(.secondary) }
+            ForEach(episodes) { episode in
+                Button {
+                    library.play(episodeID: episode.id, podcastID: podcastID, accountID: accountID)
+                } label: {
+                    Label(episode.title, systemImage: "play.circle")
+                }
+                .disabled(episode.audioUrl.isEmpty)
+            }
         }
     }
 
@@ -348,13 +369,13 @@ private final class EpisodePlayback: ObservableObject {
         player.replaceCurrentItem(with: item)
         canPlay = true
         // Callbacks may already be queued when an episode or account changes.
-        playerStatus = player.observe(.timeControlStatus, options: [.new]) { [weak self] _, _ in
+        playerStatus = player.observe(\AVPlayer.timeControlStatus, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.update(id: id) }
         }
-        itemStatus = item.observe(.status, options: [.new]) { [weak self] _, _ in
+        itemStatus = item.observe(\AVPlayerItem.status, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.update(id: id) }
         }
-        rangesStatus = item.observe(.seekableTimeRanges, options: [.new]) { [weak self] _, _ in
+        rangesStatus = item.observe(\AVPlayerItem.seekableTimeRanges, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.update(id: id) }
         }
         positionObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
