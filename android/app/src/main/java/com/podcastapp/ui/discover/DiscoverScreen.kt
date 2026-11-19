@@ -2,6 +2,7 @@ package com.podcastapp.ui.discover
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -19,6 +20,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -26,13 +28,15 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.podcastapp.data.feed.platformLabel
 import com.podcastapp.ui.components.InlineIssue
 
 @Composable
+@Suppress("UNUSED_PARAMETER")
 fun DiscoverScreen(
     onOpenPodcast: (String) -> Unit,
     onOpenFileMedia: () -> Unit,
-    viewModel: DiscoverViewModel = viewModel(),
+    viewModel: PlatformImportViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsState()
     Column(
@@ -41,39 +45,98 @@ fun DiscoverScreen(
     ) {
         Text("导入", Modifier.semantics { heading() }, style = MaterialTheme.typography.headlineMedium)
         Button(onClick = onOpenFileMedia, modifier = Modifier.fillMaxWidth()) { Text("文件音源") }
-        Text("导入 RSS", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge)
-        Text("粘贴播客的 RSS 地址，即可导入并订阅节目。", style = MaterialTheme.typography.bodyLarge)
+
+        Text("平台链接导入", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge)
+        Text(
+            "粘贴公开 RSS/OPML 地址或 Apple 播客分享链接；Apple 链接通过官方接口查询公开 RSS。",
+            style = MaterialTheme.typography.bodyLarge,
+        )
         OutlinedTextField(
-            value = state.feedUrl,
-            onValueChange = viewModel::setFeedUrl,
+            value = state.input,
+            onValueChange = viewModel::setInput,
             enabled = !state.loading,
-            label = { Text("RSS 地址") },
-            isError = state.inputError != null,
-            supportingText = { Text(state.inputError ?: "以 https:// 或 http:// 开头") },
+            label = { Text("节目链接") },
+            supportingText = {
+                Text(
+                    state.platformHint.ifBlank { "以 https:// 或 http:// 开头" },
+                    color = if (state.platformHint.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.primary,
+                )
+            },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = { if (state.feedUrl.isNotBlank()) viewModel.addFeed() }),
+            keyboardActions = KeyboardActions(onDone = { if (state.input.isNotBlank()) viewModel.`import`() }),
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
-        val importError = state.importError
-        if (importError != null) {
-            InlineIssue(importError, viewModel::addFeed)
+        val error = state.error
+        if (error != null) {
+            InlineIssue(
+                message = error,
+                onRetry = { viewModel.`import`() },
+                onDismiss = { viewModel.setInput(state.input) },
+            )
         } else {
-            Button(onClick = viewModel::addFeed, enabled = !state.loading && state.feedUrl.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = { viewModel.`import`() },
+                enabled = !state.loading && state.input.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Text(if (state.loading) "导入中…" else "导入并订阅")
             }
         }
         if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-        Text("仅导入你有权使用的音源。不绕过付费、地区限制或 DRM。",
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        state.addedPodcast?.let { podcast ->
+        state.message?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+        Text(
+            "只导入你有权使用的公开音源。Spotify/小宇宙/喜马拉雅等页面需提供节目公开 RSS 地址；不绕过付费、地区限制或 DRM。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Text("我的本地订阅", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge)
+        if (state.feeds.isEmpty()) {
+            Text("还没有本地订阅。导入公开 RSS 后即可在此浏览和播放。", style = MaterialTheme.typography.bodyMedium)
+        }
+        state.feeds.forEach { feed ->
             Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("已导入并订阅", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                    Text(podcast.title, style = MaterialTheme.typography.titleMedium)
-                    TextButton(onClick = { onOpenPodcast(podcast.id) }) { Text("查看节目") }
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(feed.platformLabel(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    Text(feed.podcast.title, style = MaterialTheme.typography.titleMedium)
+                    if (feed.podcast.description.isNotBlank()) {
+                        Text(feed.podcast.description, style = MaterialTheme.typography.bodySmall)
+                    }
+                    Text(feed.feedUrl, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { viewModel.refresh(feed.id) }) { Text("刷新") }
+                        TextButton(onClick = { viewModel.remove(feed.id) }) { Text("移除") }
+                    }
+                    feed.episodes.forEach { episode ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(episode.title, style = MaterialTheme.typography.bodyMedium)
+                                val length = durationLabel(episode.durationSeconds)
+                                if (length.isNotBlank()) {
+                                    Text(length, style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            TextButton(onClick = { viewModel.play(feed, episode) }) { Text("播放") }
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+private fun durationLabel(seconds: Int): String {
+    if (seconds <= 0) return ""
+    val hours = seconds / 3600
+    val minutes = (seconds % 3600) / 60
+    val rest = seconds % 60
+    return if (hours > 0) "$hours:" + "%02d:%02d".format(minutes, rest)
+    else "$minutes:" + "%02d".format(rest)
 }

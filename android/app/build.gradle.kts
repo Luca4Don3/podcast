@@ -22,7 +22,7 @@ plugins {
 // Linux-style release number. Android's independent upgrade counter always increases.
 val podcastVersion = "1.5.0"
 val podcastVersionCode = 16
-require(podcastVersion.matches(Regex("(?:0|[1-9][0-9]*)[.](?:0|[1-9][0-9]*)(?:[.][1-9][0-9]*|-rc[1-9][0-9]*)?"))) {
+require(podcastVersion.matches(Regex("(?:0|[1-9][0-9]*)[.](?:0|[1-9][0-9]*)(?:[.](?:0|[1-9][0-9]*)|-rc[1-9][0-9]*)?"))) {
     "Expected Linux-style podcast version (for example 1.4, 1.4.1 or 1.5-rc1)"
 }
 

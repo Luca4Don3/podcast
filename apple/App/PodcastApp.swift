@@ -1,5 +1,8 @@
 import AVFoundation
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import PodcastKit
 import SwiftUI
 
@@ -11,224 +14,411 @@ struct PodcastApp: App {
 
     var body: some Scene {
         WindowGroup {
-            Group {
-                if let accountID = library.accountID {
-                    LibraryView(library: library, accountID: accountID)
-                        .id(accountID)
-                } else {
-                    SignInView(library: library)
+            LibraryView(library: library)
+                .onChange(of: scenePhase) { phase in
+                    if phase == .background { library.playback.pause() }
                 }
-            }
-            .onChange(of: scenePhase) { phase in
-                if phase == .background { library.playback.pause() }
-            }
         }
     }
 }
 
-private enum LoadState<Value> {
-    case loading
-    case loaded(Value)
-    case failed(String)
+// MARK: - Local, Codable library (no account, no credentials)
+
+private struct StoredEpisode: Codable, Identifiable, Equatable, Sendable {
+    let id: String
+    let title: String
+    let audioUrl: String
+    let publishedAt: String?
+    let durationSeconds: Int?
+
+    init(id: String, title: String, audioUrl: String, publishedAt: String?, durationSeconds: Int?) {
+        self.id = id
+        self.title = title
+        self.audioUrl = audioUrl
+        self.publishedAt = publishedAt
+        self.durationSeconds = durationSeconds
+    }
+
+    init(_ episode: ParsedEpisode) {
+        self.init(id: episode.id, title: episode.title, audioUrl: episode.audioUrl.absoluteString,
+                  publishedAt: episode.publishedAt, durationSeconds: episode.durationSeconds)
+    }
+}
+
+private struct StoredFeed: Codable, Identifiable, Equatable, Sendable {
+    let id: String
+    let sourceURL: String
+    var title: String
+    var author: String
+    var summary: String?
+    var episodes: [StoredEpisode]
+    var refreshedAt: Date?
+
+    init(id: String, sourceURL: String, title: String, author: String, summary: String?,
+         episodes: [StoredEpisode], refreshedAt: Date? = Date()) {
+        self.id = id
+        self.sourceURL = sourceURL
+        self.title = title
+        self.author = author
+        self.summary = summary
+        self.episodes = episodes
+        self.refreshedAt = refreshedAt
+    }
+}
+
+/// A single JSON file in the app's documents directory. Only public feed metadata is written.
+private struct LocalFeedStore {
+    let fileURL: URL
+
+    init(fileName: String = "podcast-library.json") {
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        fileURL = directory.appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    func load() -> [StoredFeed] {
+        guard let data = try? Data(contentsOf: fileURL) else { return [] }
+        return (try? JSONDecoder().decode([StoredFeed].self, from: data)) ?? []
+    }
+
+    func save(_ feeds: [StoredFeed]) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(feeds)
+        try data.write(to: fileURL, options: .atomic)
+    }
+}
+
+// MARK: - Fixed, localized errors (never echo user input or server strings)
+
+private enum FeedAddError: LocalizedError {
+    case emptyInput
+    case invalidReference
+    case requestFailed
+    case badStatus
+    case tooLarge
+    case malformedFeed
+    case malformedOPML
+    case missingFeedURL
+    case webNeedsRSS
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyInput: return "请输入播客源地址。"
+        case .invalidReference: return "播客源地址无效或不受支持。"
+        case .requestFailed: return "无法读取播客源，请检查网络后重试。"
+        case .badStatus: return "播客源请求失败，请检查地址或稍后重试。"
+        case .tooLarge: return "播客源内容超过大小限制。"
+        case .malformedFeed: return "播客源内容格式不正确。"
+        case .malformedOPML: return "OPML 订阅列表格式不正确。"
+        case .missingFeedURL: return "Apple Podcasts 查询结果中没有公开的 RSS 地址。"
+        case .webNeedsRSS: return "需要节目公开 RSS 地址。该平台的分享链接无法直接解析为订阅源。"
+        }
+    }
+}
+
+private func safeMessage(_ error: Error, fallback: String) -> String {
+    (error as? LocalizedError)?.errorDescription ?? fallback
+}
+
+// MARK: - Direct HTTP(S) fetching via URLSession
+
+private enum FeedHTTP {
+    static let maximumFeedBytes = 4 * 1024 * 1024
+    static let maximumLookupBytes = 512 * 1024
+
+    static func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
+        // No custom delegate: the system's default TLS validation stays in force.
+        return URLSession(configuration: configuration)
+    }
+
+    static func data(from url: URL, session: URLSession, limit: Int) async throws -> Data {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        request.httpShouldHandleCookies = false
+        request.setValue("application/rss+xml, application/xml, text/xml, application/json;q=0.9, */*;q=0.5",
+                         forHTTPHeaderField: "Accept")
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            try Task.checkCancellation()
+            throw FeedAddError.requestFailed
+        }
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw FeedAddError.badStatus
+        }
+        guard data.count <= limit else { throw FeedAddError.tooLarge }
+        return data
+    }
+}
+
+private struct LookupResponse: Decodable {
+    struct Item: Decodable {
+        let feedUrl: String?
+        let collectionName: String?
+        let artistName: String?
+    }
+    let results: [Item]
 }
 
 @MainActor
 private final class LibrarySession: ObservableObject {
-    @Published private(set) var accountID: UUID?
-    @Published private(set) var signingIn = false
-    @Published private(set) var signInError: String?
-    @Published private(set) var subscriptions: LoadState<[PodcastSummary]> = .loading
-    @Published private(set) var episodes: LoadState<[PodcastEpisode]> = .loading
+    @Published private(set) var feeds: [StoredFeed] = []
     @Published private(set) var selection: String?
+    @Published private(set) var isFetching = false
+    @Published private(set) var addError: String?
+    @Published private(set) var libraryError: String?
 
-    private var credentials: (api: PodcastAPI, token: String)?
-    private var loginTask: Task<Void, Never>?
-    private var subscriptionsTask: Task<Void, Never>?
-    private var episodesTask: Task<Void, Never>?
-    private var loginAttempt: UUID?
-    private var episodesRequest: UUID?
+    private let store = LocalFeedStore()
+    private let session = FeedHTTP.makeSession()
     let playback = EpisodePlayback()
 
-    var selectedPodcast: PodcastSummary? {
-        guard case .loaded(let podcasts) = subscriptions else { return nil }
-        return podcasts.first { $0.id == selection }
+    var selectedFeed: StoredFeed? {
+        feeds.first { $0.id == selection }
     }
 
-    func signIn(server: String, email: String, password: String) {
-        guard accountID == nil, !signingIn else { return }
-        let api: PodcastAPI
-        do {
-            api = PodcastAPI(baseURL: try PodcastAPI.serverURL(server))
-        } catch {
-            signInError = apiMessage(error, fallback: "请输入有效的 HTTPS 服务器地址。")
-            return
+    init() {
+        feeds = store.load()
+    }
+
+    func select(_ feedID: String?) {
+        guard selection != feedID else { return }
+        if let feedID {
+            guard feeds.contains(where: { $0.id == feedID }) else { return }
         }
-        let attempt = UUID()
-        loginAttempt = attempt
-        signInError = nil
-        signingIn = true
-        loginTask = Task { [weak self] in
-            do {
-                let token = try await api.login(email: email, password: password)
-                guard let self, !Task.isCancelled, self.loginAttempt == attempt else { return }
-                self.finishSignIn()
-                self.credentials = (api, token)
-                self.accountID = attempt
-                self.loadSubscriptions(accountID: attempt)
-            } catch {
-                guard let self, !Task.isCancelled, self.loginAttempt == attempt else { return }
-                self.finishSignIn()
-                self.signInError = apiMessage(error, fallback: "登录失败，请检查账号和网络后重试。")
-            }
-        }
+        selection = feedID
     }
 
-    func cancelSignIn() {
-        guard accountID == nil else { return }
-        loginTask?.cancel()
-        finishSignIn()
+    func removeFeed(_ feedID: String) {
+        guard let index = feeds.firstIndex(where: { $0.id == feedID }) else { return }
+        feeds.remove(at: index)
+        if selection == feedID { selection = feeds.first?.id }
+        persist()
     }
 
-    private func finishSignIn() {
-        loginAttempt = nil
-        loginTask = nil
-        signingIn = false
-    }
-
-    func loadSubscriptions(accountID: UUID) {
-        guard self.accountID == accountID, let credentials, subscriptionsTask == nil else { return }
-        subscriptions = .loading
-        subscriptionsTask = Task { [weak self] in
-            let result: LoadState<[PodcastSummary]>
-            do {
-                result = .loaded(try await credentials.api.podcasts(token: credentials.token))
-            } catch {
-                result = .failed(apiMessage(error, fallback: "无法读取订阅，请重试。"))
-            }
-            guard let self, !Task.isCancelled, self.accountID == accountID else { return }
-            self.subscriptionsTask = nil
-            self.subscriptions = result
-        }
-    }
-
-    func select(_ podcastID: String?, accountID: UUID) {
-        guard self.accountID == accountID, podcastID != selection else { return }
-        if let podcastID {
-            guard case .loaded(let podcasts) = subscriptions,
-                  podcasts.contains(where: { $0.id == podcastID }) else { return }
-        }
-        selection = podcastID
-        episodesTask?.cancel()
-        episodesTask = nil
-        episodesRequest = nil
-        episodes = .loading
-        if let podcastID { loadEpisodes(podcastID: podcastID, accountID: accountID) }
-    }
-
-    func loadEpisodes(podcastID: String, accountID: UUID) {
-        guard self.accountID == accountID, selection == podcastID, let credentials else { return }
-        episodesTask?.cancel()
-        episodes = .loading
-        let request = UUID()
-        episodesRequest = request
-        episodesTask = Task { [weak self] in
-            let result: LoadState<[PodcastEpisode]>
-            do {
-                result = .loaded(try await credentials.api.episodes(podcastID: podcastID, token: credentials.token))
-            } catch {
-                result = .failed(apiMessage(error, fallback: "无法读取单集，请重试。"))
-            }
-            guard let self, !Task.isCancelled, self.accountID == accountID,
-                  self.selection == podcastID, self.episodesRequest == request else { return }
-            self.episodesTask = nil
-            self.episodesRequest = nil
-            self.episodes = result
-        }
-    }
-
-    func play(episodeID: String, podcastID: String, accountID: UUID) {
-        guard self.accountID == accountID, selection == podcastID,
-              case .loaded(let currentEpisodes) = episodes,
-              let episode = currentEpisodes.first(where: { $0.id == episodeID }) else { return }
+    func play(_ episode: StoredEpisode, feedID: String) {
+        guard selection == feedID, let feed = selectedFeed,
+              feed.episodes.contains(where: { $0.id == episode.id }) else { return }
         playback.play(episode)
     }
 
-    func signOut(accountID: UUID) {
-        guard self.accountID == accountID else { return }
-        self.accountID = nil
-        credentials = nil
-        subscriptionsTask?.cancel()
-        subscriptionsTask = nil
-        episodesTask?.cancel()
-        episodesTask = nil
-        episodesRequest = nil
-        selection = nil
-        subscriptions = .loading
-        episodes = .loading
-        signInError = nil
-        playback.reset()
+    @discardableResult
+    func addSource(_ input: String) async -> Bool {
+        guard !isFetching else { return false }
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            addError = FeedAddError.emptyInput.errorDescription
+            return false
+        }
+        let reference: FeedReference
+        do {
+            reference = try PlatformFeedAdapter.normalize(value)
+        } catch {
+            addError = safeMessage(error, fallback: FeedAddError.invalidReference.errorDescription ?? "")
+            return false
+        }
+        switch reference {
+        case .webMetadata:
+            // No web page is fetched: these platforms need a public RSS URL.
+            addError = FeedAddError.webNeedsRSS.errorDescription
+            return false
+        case .appleLookup(let lookup):
+            return await perform {
+                let data = try await FeedHTTP.data(from: lookup, session: session,
+                                                   limit: FeedHTTP.maximumLookupBytes)
+                let result: LookupResponse
+                do { result = try JSONDecoder().decode(LookupResponse.self, from: data) }
+                catch { throw FeedAddError.malformedFeed }
+                let first = result.results.first
+                guard let feedURL = first?.feedUrl.flatMap({ Self.safeHTTPURL($0) }) else {
+                    throw FeedAddError.missingFeedURL
+                }
+                try await ingest(feedURL, author: first?.artistName ?? "", titleHint: first?.collectionName)
+            }
+        case .directFeed(let feedURL):
+            return await perform {
+                try await ingest(feedURL, author: "", titleHint: nil)
+            }
+        }
+    }
+
+    private func perform(_ work: @MainActor () async throws -> Void) async -> Bool {
+        isFetching = true
+        addError = nil
+        defer { isFetching = false }
+        do {
+            try Task.checkCancellation()
+            try await work()
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            addError = safeMessage(error, fallback: "无法添加播客源，请重试。")
+            return false
+        }
+    }
+
+    private func ingest(_ url: URL, author: String, titleHint: String?) async throws {
+        let data = try await FeedHTTP.data(from: url, session: session, limit: FeedHTTP.maximumFeedBytes)
+        if Self.looksLikeOPML(data) {
+            let outlines: [OpmlFeed]
+            do { outlines = try PlatformFeedAdapter.parseOPML(data) }
+            catch { throw Self.adapterError(error) }
+            guard !outlines.isEmpty else { throw FeedAddError.malformedOPML }
+            for outline in outlines {
+                try Task.checkCancellation()
+                guard let reference = try? PlatformFeedAdapter.normalize(outline.url.absoluteString),
+                      case .directFeed(let feedURL) = reference else { continue }
+                let feedData = try await FeedHTTP.data(from: feedURL, session: session,
+                                                       limit: FeedHTTP.maximumFeedBytes)
+                let parsed: ParsedFeed
+                do { parsed = try PlatformFeedAdapter.parseFeed(feedData) }
+                catch { throw Self.adapterError(error) }
+                ingestSingle(feedURL, parsed: parsed, author: "", titleHint: outline.title)
+            }
+        } else {
+            let parsed: ParsedFeed
+            do { parsed = try PlatformFeedAdapter.parseFeed(data) }
+            catch { throw Self.adapterError(error) }
+            ingestSingle(url, parsed: parsed, author: author, titleHint: titleHint)
+        }
+    }
+
+    private func ingestSingle(_ url: URL, parsed: ParsedFeed, author: String, titleHint: String?) {
+        let title: String
+        if !parsed.title.isEmpty {
+            title = parsed.title
+        } else if let hint = titleHint, !hint.isEmpty {
+            title = hint
+        } else {
+            title = url.host ?? "播客"
+        }
+        let feed = StoredFeed(id: Self.feedID(for: url), sourceURL: url.absoluteString, title: title,
+                              author: author, summary: parsed.description,
+                              episodes: parsed.episodes.map { StoredEpisode($0) })
+        if let index = feeds.firstIndex(where: { $0.id == feed.id }) {
+            feeds[index] = feed
+        } else {
+            feeds.append(feed)
+        }
+        selection = feed.id
+        persist()
+    }
+
+    private func persist() {
+        do {
+            try store.save(feeds)
+            libraryError = nil
+        } catch {
+            libraryError = "无法保存本地订阅，请检查设备存储空间。"
+        }
+    }
+
+    private static func looksLikeOPML(_ data: Data) -> Bool {
+        let head = String(decoding: data.prefix(4096), as: UTF8.self)
+        return head.range(of: "<opml", options: .caseInsensitive) != nil
+    }
+
+    private static func adapterError(_ error: Error) -> FeedAddError {
+        guard let error = error as? FeedAdapterError else { return .malformedFeed }
+        switch error {
+        case .inputTooLarge, .itemLimitExceeded: return .tooLarge
+        case .malformedOPML: return .malformedOPML
+        case .invalidReference: return .invalidReference
+        case .externalEntityForbidden, .malformedFeed: return .malformedFeed
+        }
+    }
+
+    private static func feedID(for url: URL) -> String {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url.absoluteString
+        }
+        components.scheme = components.scheme?.lowercased()
+        components.percentEncodedHost = components.percentEncodedHost?.lowercased()
+        components.fragment = nil
+        return components.string ?? url.absoluteString
+    }
+
+    private static func safeHTTPURL(_ raw: String) -> URL? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let forbidden = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
+        guard !value.isEmpty,
+              value.rangeOfCharacter(from: forbidden) == nil,
+              !value.contains("\\"),
+              var components = URLComponents(string: value),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.percentEncodedHost, !host.isEmpty,
+              components.user == nil, components.password == nil,
+              components.percentEncodedUser == nil, components.percentEncodedPassword == nil,
+              components.port.map({ (1...65535).contains($0) }) ?? true,
+              components.url != nil else { return nil }
+        components.scheme = scheme
+        components.percentEncodedHost = host.lowercased()
+        components.fragment = nil
+        return components.url
     }
 }
 
-// Only PodcastKit's deliberately safe LocalizedError descriptions reach the UI.
-private func apiMessage(_ error: Error, fallback: String) -> String {
-    (error as? LocalizedError)?.errorDescription ?? fallback
-}
+// MARK: - Add source
 
 @MainActor
-private struct SignInView: View {
+private struct AddSourceView: View {
     @ObservedObject var library: LibrarySession
-    @State private var server = ""
-    @State private var email = ""
-    @State private var password = ""
+    @Environment(\.dismiss) private var dismiss
+    @State private var input = ""
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("服务器与账号") {
-                    inputRow("HTTPS 服务器地址") {
-                        TextField("HTTPS 服务器地址", text: $server, prompt: Text("https://podcast.example.com"))
+                Section("播客源地址") {
+                    inputRow("RSS / Atom / OPML 或分享链接") {
+                        TextField("https://example.com/feed.xml", text: $input)
                             .keyboardType(.URL)
                             .textContentType(.URL)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                     }
-                    inputRow("邮箱") {
-                        TextField("邮箱", text: $email, prompt: Text("name@example.com"))
-                            .keyboardType(.emailAddress)
-                            .textContentType(.username)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-                    inputRow("密码") {
-                        SecureField("密码", text: $password)
-                            .textContentType(.password)
-                    }
                 }
-                .disabled(library.signingIn)
+                .disabled(library.isFetching)
                 Section {
-                    if library.signingIn {
-                        ProgressView("正在登录…")
-                        Button("取消登录") { library.cancelSignIn() }
+                    if library.isFetching {
+                        ProgressView("正在读取播客源…")
                     } else {
-                        Button("登录", action: submit)
-                            .disabled(server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                      || email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                      || password.isEmpty)
+                        Button("添加播客源") {
+                            Task { @MainActor in
+                                if await library.addSource(input) { dismiss() }
+                            }
+                        }
+                        .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
-                    if let message = library.signInError {
+                    if let message = library.addError {
+                        Text(message).foregroundStyle(.secondary)
+                    }
+                    if let message = library.libraryError {
                         Text(message).foregroundStyle(.secondary)
                     }
                 }
-                DisclosureGroup("首版范围与限制") {
-                    Text("使用已有账号。仅查看订阅和接口返回的单集（不翻页）；不支持注册、订阅管理、搜索或导入。")
-                    Text("仅播放 AVPlayer 支持的 HTTPS 单集音源，不附加登录令牌。有可用定位范围的点播才能拖动进度；不支持下载、后台播放或进度同步。")
-                    Text("密码不保存，访问令牌仅驻留本次登录的内存。到期需重新登录；注销仅退出本机，不撤销服务器令牌。")
+                DisclosureGroup("支持的来源与限制") {
+                    Text("公开 RSS / Atom 地址与 OPML 订阅列表 URL 通过 URLSession 直接读取；Apple Podcasts 分享链接先请求官方 iTunes Lookup JSON，再读取其中的 RSS。")
+                    Text("Spotify、小宇宙、喜马拉雅分享链接需要节目公开 RSS 地址；不会抓取第三方网页。")
+                    Text("订阅与单集保存在本机文档目录的 JSON 文件中，不保存密码或令牌。播放仅支持 HTTPS 音源，遵循系统证书校验。")
                 }
             }
             .scrollDismissesKeyboard(.interactively)
-            .navigationTitle("Podcast")
+            .navigationTitle("添加播客源")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+            }
         }
     }
 
@@ -237,29 +427,24 @@ private struct SignInView: View {
             Text(title)
                 .font(.subheadline.weight(.medium))
                 .fixedSize(horizontal: false, vertical: true)
-                .accessibilityHidden(true) // The native text field already announces this label.
+                .accessibilityHidden(true)
             field()
                 .labelsHidden()
                 .frame(minHeight: 44)
         }
     }
-
-    private func submit() {
-        let submittedPassword = password
-        password = ""
-        library.signIn(server: server, email: email.trimmingCharacters(in: .whitespacesAndNewlines),
-                       password: submittedPassword)
-    }
 }
+
+// MARK: - Library
 
 @MainActor
 private struct LibraryView: View {
     @ObservedObject var library: LibrarySession
     @Environment(\.dynamicTypeSize) private var typeSize
-    let accountID: UUID
+    @State private var showingAddSource = false
 
     private var selection: Binding<String?> {
-        Binding(get: { library.selection }, set: { library.select($0, accountID: accountID) })
+        Binding(get: { library.selection }, set: { library.select($0) })
     }
 
     var body: some View {
@@ -272,35 +457,53 @@ private struct LibraryView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             PlaybackBar(playback: library.playback)
         }
+        .sheet(isPresented: $showingAddSource) {
+            AddSourceView(library: library)
+        }
     }
 
     private var sidebar: some View {
         List(selection: selection) {
             subscriptionRows
+            if let message = library.libraryError {
+                Text(message).font(.footnote).foregroundStyle(.secondary)
+            }
         }
         .listStyle(.sidebar)
         .navigationTitle("订阅")
-        .toolbar { signOutButton }
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    showingAddSource = true
+                } label: {
+                    Label("添加播客源", systemImage: "plus")
+                }
+                .accessibilityLabel("添加播客源")
+            }
+        }
     }
 
     @ViewBuilder
     private var subscriptionRows: some View {
-        switch library.subscriptions {
-        case .loading:
-            ProgressView("正在读取订阅…")
-        case .failed(let message):
-            RetryRow(message: message) { library.loadSubscriptions(accountID: accountID) }
-        case .loaded(let podcasts):
-            if podcasts.isEmpty { Text("没有订阅").foregroundStyle(.secondary) }
-            ForEach(podcasts) { podcast in
-                NavigationLink(value: podcast.id) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(podcast.title)
-                        if !podcast.author.isEmpty {
-                            Text(podcast.author).font(.subheadline).foregroundStyle(.secondary)
-                        }
+        if library.feeds.isEmpty {
+            Text("还没有订阅。点按右上角的“+”添加播客源。")
+                .foregroundStyle(.secondary)
+        }
+        ForEach(library.feeds) { feed in
+            NavigationLink(value: feed.id) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(feed.title)
+                    if !feed.author.isEmpty {
+                        Text(feed.author).font(.subheadline).foregroundStyle(.secondary)
                     }
-                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                Button(role: .destructive) {
+                    library.removeFeed(feed.id)
+                } label: {
+                    Label("删除订阅", systemImage: "trash")
                 }
             }
         }
@@ -308,19 +511,21 @@ private struct LibraryView: View {
 
     @ViewBuilder
     private var detail: some View {
-        if let podcast = library.selectedPodcast {
+        if let feed = library.selectedFeed {
             List {
                 if typeSize.isAccessibilitySize {
-                    Text(podcast.title)
+                    Text(feed.title)
                         .font(.title2.bold())
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.isHeader)
                 }
-                episodeRows(podcastID: podcast.id)
+                if let summary = feed.summary, !summary.isEmpty {
+                    Text(summary).font(.subheadline).foregroundStyle(.secondary)
+                }
+                episodeRows(feed: feed)
             }
-            .navigationTitle(typeSize.isAccessibilitySize ? "单集" : podcast.title)
+            .navigationTitle(typeSize.isAccessibilitySize ? "单集" : feed.title)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { signOutButton }
         } else {
             Text("选择一个订阅以查看单集")
                 .foregroundStyle(.secondary)
@@ -329,48 +534,34 @@ private struct LibraryView: View {
     }
 
     @ViewBuilder
-    private func episodeRows(podcastID: String) -> some View {
-        switch library.episodes {
-        case .loading:
-            ProgressView("正在读取单集…")
-        case .failed(let message):
-            RetryRow(message: message) { library.loadEpisodes(podcastID: podcastID, accountID: accountID) }
-        case .loaded(let episodes):
-            if episodes.isEmpty { Text("没有单集").foregroundStyle(.secondary) }
-            ForEach(episodes) { episode in
-                Button {
-                    library.play(episodeID: episode.id, podcastID: podcastID, accountID: accountID)
-                } label: {
-                    Label {
+    private func episodeRows(feed: StoredFeed) -> some View {
+        if feed.episodes.isEmpty {
+            Text("该播客源没有可播放的单集。").foregroundStyle(.secondary)
+        }
+        ForEach(feed.episodes) { episode in
+            Button {
+                library.play(episode, feedID: feed.id)
+            } label: {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(episode.title).fixedSize(horizontal: false, vertical: true)
-                    } icon: {
-                        Image(systemName: "play.circle")
+                        if let published = episode.publishedAt, !published.isEmpty {
+                            Text(published)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
                     }
+                } icon: {
+                    Image(systemName: "play.circle")
                 }
-                .disabled(episode.audioUrl.isEmpty)
             }
-        }
-    }
-
-    private var signOutButton: some ToolbarContent {
-        ToolbarItem(placement: .navigationBarTrailing) {
-            Button("注销") { library.signOut(accountID: accountID) }
+            .disabled(episode.audioUrl.isEmpty)
         }
     }
 }
 
-@MainActor
-private struct RetryRow: View {
-    let message: String
-    let retry: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(message).foregroundStyle(.secondary)
-            Button("重试", action: retry)
-        }
-    }
-}
+// MARK: - Playback (AVPlayer; HTTPS-only enclosure check is unchanged)
 
 @MainActor
 private final class EpisodePlayback: ObservableObject {
@@ -392,7 +583,7 @@ private final class EpisodePlayback: ObservableObject {
     @Published private(set) var seekRange: ClosedRange<Double>?
     private var ended = false
 
-    func play(_ episode: PodcastEpisode) {
+    func play(_ episode: StoredEpisode) {
         reset()
         title = episode.title
         guard let components = URLComponents(string: episode.audioUrl),
@@ -405,14 +596,14 @@ private final class EpisodePlayback: ObservableObject {
         let id = itemID
         player.replaceCurrentItem(with: item)
         canPlay = true
-        // Callbacks may already be queued when an episode or account changes.
-        playerStatus = player.observe(\AVPlayer.timeControlStatus, options: [.new]) { [weak self] _, _ in
+        // Callbacks may already be queued when an episode changes.
+        playerStatus = player.observe(\.AVPlayer.timeControlStatus, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.update(id: id) }
         }
-        itemStatus = item.observe(\AVPlayerItem.status, options: [.new]) { [weak self] _, _ in
+        itemStatus = item.observe(\.AVPlayerItem.status, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.update(id: id) }
         }
-        rangesStatus = item.observe(\AVPlayerItem.seekableTimeRanges, options: [.new]) { [weak self] _, _ in
+        rangesStatus = item.observe(\.AVPlayerItem.seekableTimeRanges, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.update(id: id) }
         }
         positionObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
