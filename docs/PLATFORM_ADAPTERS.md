@@ -37,6 +37,10 @@ Android 支持系统分享菜单中的 `text/plain` 链接，以及来自 Apple 
 
 外接耳机、蓝牙耳机和车机的音频路由由系统完成，不按设备型号适配。Android 使用 Media3 的媒体音频属性、音频焦点和“音频设备断开即暂停”；Apple 使用 `AVAudioSession` 的 `.playback`/`.spokenAudio`，监听输出路由变化和来电等中断，并接入系统播放/暂停遥控命令。应用不需要 Bluetooth 连接权限即可把音频输出到已配对设备。系统事件处理不等于真机兼容性测试。
 
+## 输入与键盘
+
+两端均使用系统输入法和标准文本控件，不实现自定义键盘。Android 通过窗口 insets 与 IME 的 Next/Done 动作保持输入框可滚动、焦点可递进、提交按钮可达；Apple 使用 SwiftUI 标准键盘类型、`submitLabel`、`onSubmit` 与 `@FocusState`，并允许滚动手势收起键盘。URL、用户名和请求头名称关闭自动大写与纠正；密码、令牌和私钥使用系统安全输入。
+
 ## 当前限制
 
 - Spotify、小宇宙、喜马拉雅尚未提供无需凭据且稳定的公开 feed 解析；分享链接导入会提示用户补充 feed。

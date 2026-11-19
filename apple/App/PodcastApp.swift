@@ -682,7 +682,22 @@ private struct AddSourceView: View {
     @State private var clientKeyPEM = ""
     @State private var clientKeyPassword = ""
 
+    // Standard SwiftUI focus handling only: no custom keyboard, no third-party input control.
+    @FocusState private var focusedField: FocusField?
+
+    private enum FocusField: Hashable {
+        case sourceURL
+        case username
+        case secret
+        case apiKeyHeader
+        case caPEM
+        case clientCertPEM
+        case clientKeyPEM
+        case clientKeyPassword
+    }
+
     private func submit() {
+        focusedField = nil
         let credentials = SourceCredentials(kind: authKind, username: username,
                                             secret: secret, header: apiKeyHeader)
         let transport = SourceTransport(requireHttps: requireHttps, customCaPem: caPEM,
@@ -706,6 +721,9 @@ private struct AddSourceView: View {
                             .textContentType(.URL)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                            .focused($focusedField, equals: .sourceURL)
+                            .submitLabel(.go)
+                            .onSubmit(submit)
                     }
                 }
                 .disabled(library.isFetching)
@@ -726,15 +744,24 @@ private struct AddSourceView: View {
                                 .textContentType(.username)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
+                                .focused($focusedField, equals: .username)
+                                .submitLabel(.next)
+                                .onSubmit { focusedField = .secret }
                         }
                         inputRow("密码") {
                             SecureField("密码", text: $secret)
                                 .textContentType(.password)
+                                .focused($focusedField, equals: .secret)
+                                .submitLabel(.done)
+                                .onSubmit(submit)
                         }
                     case .bearer:
                         inputRow("Bearer 令牌") {
                             SecureField("令牌", text: $secret)
                                 .textContentType(.password)
+                                .focused($focusedField, equals: .secret)
+                                .submitLabel(.done)
+                                .onSubmit(submit)
                         }
                     case .digest:
                         inputRow("用户名") {
@@ -742,20 +769,32 @@ private struct AddSourceView: View {
                                 .textContentType(.username)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
+                                .focused($focusedField, equals: .username)
+                                .submitLabel(.next)
+                                .onSubmit { focusedField = .secret }
                         }
                         inputRow("密码") {
                             SecureField("密码", text: $secret)
                                 .textContentType(.password)
+                                .focused($focusedField, equals: .secret)
+                                .submitLabel(.done)
+                                .onSubmit(submit)
                         }
                     case .apiKey:
                         inputRow("API Key 请求头名称") {
                             TextField("X-API-Key", text: $apiKeyHeader)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
+                                .focused($focusedField, equals: .apiKeyHeader)
+                                .submitLabel(.next)
+                                .onSubmit { focusedField = .secret }
                         }
                         inputRow("API Key") {
                             SecureField("API Key", text: $secret)
                                 .textContentType(.password)
+                                .focused($focusedField, equals: .secret)
+                                .submitLabel(.done)
+                                .onSubmit(submit)
                         }
                     }
                 }
@@ -766,18 +805,30 @@ private struct AddSourceView: View {
                     inputRow("自定义 CA PEM") {
                         TextEditor(text: $caPEM).frame(minHeight: 60)
                             .font(.footnote.monospaced())
+                            .focused($focusedField, equals: .caPEM)
+                            .submitLabel(.done)
+                            .onSubmit { focusedField = nil }
                     }
                     inputRow("客户端证书 PEM / iOS PKCS#12 Base64") {
                         TextEditor(text: $clientCertPEM).frame(minHeight: 60)
                             .font(.footnote.monospaced())
+                            .focused($focusedField, equals: .clientCertPEM)
+                            .submitLabel(.done)
+                            .onSubmit { focusedField = nil }
                     }
                     inputRow("客户端私钥 PEM（仅存钥匙串）") {
                         SecureField("私钥", text: $clientKeyPEM)
                             .textContentType(.password)
+                            .focused($focusedField, equals: .clientKeyPEM)
+                            .submitLabel(.done)
+                            .onSubmit { focusedField = nil }
                     }
                     inputRow("私钥密码（仅存钥匙串）") {
                         SecureField("密码", text: $clientKeyPassword)
                             .textContentType(.password)
+                            .focused($focusedField, equals: .clientKeyPassword)
+                            .submitLabel(.done)
+                            .onSubmit { focusedField = nil }
                     }
                 }
                 .disabled(library.isFetching)
@@ -802,6 +853,12 @@ private struct AddSourceView: View {
                 }
             }
             .scrollDismissesKeyboard(.interactively)
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("完成") { focusedField = nil }
+                }
+            }
             .navigationTitle("添加播客源")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

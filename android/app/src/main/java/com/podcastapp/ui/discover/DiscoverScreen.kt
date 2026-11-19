@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -29,9 +30,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -73,6 +78,18 @@ fun DiscoverScreen(
     var clientCertPem by remember { mutableStateOf("") }
     var clientKeyPem by remember { mutableStateOf("") }
     var clientKeyPassword by remember { mutableStateOf("") }
+    // 焦点只用于系统输入法的 Next 导航，不保存任何输入内容。
+    val focusManager = LocalFocusManager.current
+    val usernameFocus = remember { FocusRequester() }
+    val secretFocus = remember { FocusRequester() }
+    val headerNameFocus = remember { FocusRequester() }
+    val caFocus = remember { FocusRequester() }
+    val certFocus = remember { FocusRequester() }
+    val clientKeyFocus = remember { FocusRequester() }
+    val clientKeyPasswordFocus = remember { FocusRequester() }
+    fun moveTo(target: FocusRequester) {
+        runCatching { target.requestFocus() }
+    }
     val credentials = when (authKind) {
         CredentialKind.NONE -> SourceCredentials()
         CredentialKind.BASIC -> SourceCredentials(kind = CredentialKind.BASIC, username = username, secret = secret)
@@ -102,8 +119,13 @@ fun DiscoverScreen(
         clientKeyPassword = ""
         viewModel.`import`(selectedCredentials, selectedTransport)
     }
+    fun submitAndHideKeyboard() {
+        focusManager.clearFocus()
+        if (state.input.isNotBlank()) startImport()
+    }
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 20.dp),
+        // 外层已按 safeDrawing 预留系统栏；此处只补 IME 高度，避免叠加导航条留白。
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 16.dp, vertical = 20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("导入", Modifier.semantics { heading() }, style = MaterialTheme.typography.headlineMedium)
@@ -126,8 +148,13 @@ fun DiscoverScreen(
                     else MaterialTheme.colorScheme.primary,
                 )
             },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = { if (state.input.isNotBlank()) startImport() }),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Uri,
+                imeAction = ImeAction.Done,
+                autoCorrect = false,
+                capitalization = KeyboardCapitalization.None,
+            ),
+            keyboardActions = KeyboardActions(onDone = { submitAndHideKeyboard() }),
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -170,7 +197,13 @@ fun DiscoverScreen(
                 enabled = !state.loading,
                 label = { Text("用户名") },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(
+                    imeAction = ImeAction.Next,
+                    autoCorrect = false,
+                    capitalization = KeyboardCapitalization.None,
+                ),
+                keyboardActions = KeyboardActions(onNext = { moveTo(secretFocus) }),
+                modifier = Modifier.fillMaxWidth().focusRequester(usernameFocus),
             )
         }
         if (authKind != CredentialKind.NONE) {
@@ -190,9 +223,18 @@ fun DiscoverScreen(
                     )
                 },
                 visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Password,
+                    imeAction = if (authKind == CredentialKind.API_KEY) ImeAction.Next else ImeAction.Done,
+                    autoCorrect = false,
+                    capitalization = KeyboardCapitalization.None,
+                ),
+                keyboardActions = KeyboardActions(
+                    onNext = { moveTo(headerNameFocus) },
+                    onDone = { submitAndHideKeyboard() },
+                ),
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().focusRequester(secretFocus),
             )
         }
         if (authKind == CredentialKind.API_KEY) {
@@ -203,7 +245,13 @@ fun DiscoverScreen(
                 label = { Text("API Key 头名") },
                 placeholder = { Text("X-API-Key") },
                 singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(
+                    imeAction = ImeAction.Next,
+                    autoCorrect = false,
+                    capitalization = KeyboardCapitalization.None,
+                ),
+                keyboardActions = KeyboardActions(onNext = { moveTo(caFocus) }),
+                modifier = Modifier.fillMaxWidth().focusRequester(headerNameFocus),
             )
         }
 
@@ -248,7 +296,13 @@ fun DiscoverScreen(
             label = { Text("自定义 CA 证书（PEM）") },
             placeholder = { Text("-----BEGIN CERTIFICATE-----") },
             minLines = 3,
-            modifier = Modifier.fillMaxWidth(),
+            keyboardOptions = KeyboardOptions(
+                imeAction = ImeAction.Next,
+                autoCorrect = false,
+                capitalization = KeyboardCapitalization.None,
+            ),
+            keyboardActions = KeyboardActions(onNext = { moveTo(certFocus) }),
+            modifier = Modifier.fillMaxWidth().focusRequester(caFocus),
         )
         OutlinedTextField(
             value = clientCertPem,
@@ -257,13 +311,22 @@ fun DiscoverScreen(
             label = { Text("mTLS 客户端证书（PEM）") },
             placeholder = { Text("-----BEGIN CERTIFICATE-----") },
             minLines = 3,
-            modifier = Modifier.fillMaxWidth(),
+            keyboardOptions = KeyboardOptions(
+                imeAction = ImeAction.Next,
+                autoCorrect = false,
+                capitalization = KeyboardCapitalization.None,
+            ),
+            keyboardActions = KeyboardActions(onNext = { moveTo(clientKeyFocus) }),
+            modifier = Modifier.fillMaxWidth().focusRequester(certFocus),
         )
         SecureField(
             value = clientKeyPem,
             onValueChange = { clientKeyPem = it },
             enabled = !state.loading,
             label = "mTLS 客户端私钥（PEM）",
+            imeAction = ImeAction.Next,
+            keyboardActions = KeyboardActions(onNext = { moveTo(clientKeyPasswordFocus) }),
+            focusRequester = clientKeyFocus,
             modifier = Modifier.fillMaxWidth(),
         )
         SecureField(
@@ -271,6 +334,8 @@ fun DiscoverScreen(
             onValueChange = { clientKeyPassword = it },
             enabled = !state.loading,
             label = "客户端私钥密码（可选）",
+            keyboardActions = KeyboardActions(onDone = { submitAndHideKeyboard() }),
+            focusRequester = clientKeyPasswordFocus,
             modifier = Modifier.fillMaxWidth(),
         )
 
@@ -345,16 +410,26 @@ private fun SecureField(
     onValueChange: (String) -> Unit,
     label: String,
     enabled: Boolean = true,
+    imeAction: ImeAction = ImeAction.Done,
+    keyboardActions: KeyboardActions = KeyboardActions.Default,
+    focusRequester: FocusRequester? = null,
     modifier: Modifier = Modifier,
 ) {
+    val fieldModifier = if (focusRequester == null) modifier else modifier.focusRequester(focusRequester)
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         enabled = enabled,
         label = { Text(label) },
         visualTransformation = PasswordVisualTransformation(),
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
-        modifier = modifier,
+        keyboardOptions = KeyboardOptions(
+            keyboardType = KeyboardType.Password,
+            imeAction = imeAction,
+            autoCorrect = false,
+            capitalization = KeyboardCapitalization.None,
+        ),
+        keyboardActions = keyboardActions,
+        modifier = fieldModifier,
     )
 }
 
