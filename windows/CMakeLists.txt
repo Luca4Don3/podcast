@@ -15,7 +15,7 @@ add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WIN
 add_compile_options(/W4 /utf-8 /permissive- /EHsc)
 
 set(cache_dir "${CMAKE_CURRENT_SOURCE_DIR}/../apple/NativeCache")
-add_library(podcast_cache STATIC "${cache_dir}/PodcastNativeCache.cpp")
+add_library(podcast_cache STATIC "${cache_dir}/PodcastNativeCache.cpp" "${cache_dir}/PodcastLibraryCore.cpp")
 target_include_directories(podcast_cache PUBLIC "${cache_dir}/include")
 
 add_executable(podcast WIN32 src/main.cpp podcast.manifest.xml)
@@ -26,6 +26,9 @@ if(BUILD_TESTING)
     add_executable(podcast_cache_test tests/cache_test.cpp)
     target_link_libraries(podcast_cache_test PRIVATE podcast_cache)
     add_test(NAME windows_cache COMMAND podcast_cache_test)
+    add_executable(podcast_library_test tests/library_core_test.cpp)
+    target_link_libraries(podcast_library_test PRIVATE podcast_cache)
+    add_test(NAME windows_library COMMAND podcast_library_test)
     add_test(NAME windows_startup COMMAND podcast --smoke-test)
     set_tests_properties(windows_cache windows_startup PROPERTIES TIMEOUT 20)
 endif()

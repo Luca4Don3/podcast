@@ -37,8 +37,23 @@ jobs:
           if (-not $x64 -or -not $arm) { throw 'missing executables' }
           Write-Output "x64 $($x64.Length) bytes"
           Write-Output "ARM64 $($arm.Length) bytes"
+      - name: Stage x64 executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force windows/dist/x64 | Out-Null
+          Copy-Item windows/build-x64/Release/podcast.exe windows/dist/x64/podcast.exe
+      - name: Stage ARM64 executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force windows/dist/arm64 | Out-Null
+          Copy-Item windows/build-arm64/Release/podcast.exe windows/dist/arm64/podcast.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-w0-x64
-          path: windows/build-x64/Release/podcast.exe
+          name: windows-x64
+          path: windows/dist/x64/podcast.exe
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-arm64
+          path: windows/dist/arm64/podcast.exe
           if-no-files-found: error
