@@ -2,6 +2,11 @@ name: release
 
 on:
   workflow_dispatch:
+    inputs:
+      apple_launch_smoke:
+        description: Install and launch podcast on both Apple simulator device families
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -65,6 +70,10 @@ jobs:
           name: apple-simulator
           path: output/apple/podcast-*-ios-simulator.zip
           if-no-files-found: error
+      - name: Launch on iPhone and iPad simulators
+        if: inputs.apple_launch_smoke == true
+        timeout-minutes: 10
+        run: bash apple/smoke-simulator.sh output/apple/DerivedData/Build/Products/Release-iphonesimulator/podcast.app
 
   server-linux:
     name: Server Linux x86_64
