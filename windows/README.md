@@ -1,18 +1,19 @@
-# Windows W0 原生原型
+# Windows W1 本机资料库原型
 
-纯 C++17 + Win32 窗口 + C++/WinRT（仅用于系统媒体播放器），无 Electron、无 WebView2、无 Windows App SDK、无后端。产物约 195 KB（x64）/ 187 KB（ARM64）。
+纯 C++17 + Win32 原生控件 + C++/WinRT（仅系统媒体播放器），无 Electron、无 WebView2、无 Windows App SDK、无后端。x64 与 ARM64 双架构均已通过 CI 编译与测试。
 
-## 当前功能
+## 已实现
 
-- 打开本地音频文件或输入公开 http(s) URL（拒绝含用户信息的地址），播放/暂停、停止、±15/30 秒跳转、倍速切换。
-- 使用 Windows 系统 MediaPlayer，自动接入系统媒体控制；进度由事件驱动，暂停/闲置不轮询。
-- 复用共享缓存核心的数量策略、媒体文件头和文件名校验；Windows 文件后端用 Win32 API，拒绝链接与多硬链接，同卷原子发布。
+- 三栏界面：订阅列表、单集列表、播放队列；订阅地址输入框与「添加订阅」「刷新」按钮。
+- RSS 2.0 / Atom 抓取与解析，受限 XML 扫描（拒绝 DTD/实体，防 XXE）；OPML 解析核心与单元测试。
+- 本机资料库存于 %LOCALAPPDATA%/Podcast，原子写入；订阅、单集、进度、队列重启后保留。
+- 队列「下一集播放/加入队尾」规则由共享 C++ 核心管理，支持上移、下移、移除；双击单集播放。
+- 保留 W0 的本地文件与公开 http(s) URL 播放、播放/暂停/停止/跳转/倍速、系统媒体会话。
 
 ## 构建与验证
 
-在装有 MSVC 与 Windows SDK 的环境，用 CMake 配置 windows/ 目录（-A x64 或 -A ARM64），Release 构建，再用 ctest 运行缓存与启动测试。
-启动冒烟：podcast.exe --smoke-test（创建窗口与播放器后立即退出，不访问网络）。CI 同时交叉编译 ARM64。
+用 MSVC 与 Windows SDK 的 CMake 配置 windows/（-A x64 或 -A ARM64），Release 构建后运行 ctest。CI 已跑 5 项测试：缓存、共享核心、订阅解析、本机存储、启动冒烟，全部通过；两个架构各自上传产物。
 
 ## 边界
 
-这不是可用的桌面版：没有订阅/OPML、资料库、断点续播、队列、缓存界面或自动更新；没有签名与安装包；没有真机播放、媒体键、混合 DPI 与性能实测。后续范围见 docs/WINDOWS_CLIENT.md。
+尚未接入：OPML 导入界面、离线缓存界面、断点续播的完整 UI（进度已存但未在重启后自动定位）、系统媒体键实测、签名安装包、混合 DPI 与无障碍实测。ARM64 为交叉编译，未上真实 ARM64 设备。后续见 docs/WINDOWS_CLIENT.md。
