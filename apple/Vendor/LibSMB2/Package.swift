@@ -8,7 +8,9 @@ let package = Package(
     targets: [.target(name: "PodcastLibSMB2", path: "Upstream",
                       exclude: ["COPYING", "LICENCE-LGPL-2.1.txt", "NOTICE-libdcerpc.txt"],
                       sources: ["lib"], publicHeadersPath: "module",
-                      cSettings: [.headerSearchPath("Upstream/include"), .headerSearchPath("Upstream/include/apple"),
-                                  .headerSearchPath("Upstream/include/smb2"), .define("HAVE_CONFIG_H", to: "1"),
+                      cSettings: [.headerSearchPath("include"), .headerSearchPath("include/apple"),
+                                  .headerSearchPath("include/smb2"), .headerSearchPath("Upstream/include"),
+                                  .headerSearchPath("Upstream/include/apple"), .headerSearchPath("Upstream/include/smb2"),
+                                  .define("HAVE_CONFIG_H", to: "1"),
                                   .define("_U_", to: "__attribute__((unused))")])]
 )
