@@ -82,7 +82,8 @@ final class SMBSourceTests: XCTestCase {
         XCTAssertEqual(path.wirePath, "Music/2025/ep 01.mp3")
         XCTAssertEqual(path.parent?.wirePath, "Music/2025")
         XCTAssertEqual(path.parent?.parent?.wirePath, "Music")
-        XCTAssertNil(path.parent?.parent?.parent)
+        XCTAssertEqual(path.parent?.parent?.parent, .root)
+        XCTAssertNil(path.parent?.parent?.parent?.parent)
     }
 
     func testPathRejectsAbsoluteTraversalAndIllegalComponents() {
