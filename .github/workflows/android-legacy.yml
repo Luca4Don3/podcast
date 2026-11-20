@@ -3,13 +3,19 @@ name: android-legacy-preview
 on:
   workflow_dispatch:
   push:
-    branches: ['verify/android-legacy-*']
+    branches: [main]
+  pull_request:
+    paths:
+      - '.github/workflows/android-legacy.yml'
+      - 'android/legacy/**'
+      - 'tests/test-android-legacy-feed.sh'
+      - 'tests/verify-android-legacy-apk.sh'
 
 permissions:
   contents: read
 
 concurrency:
-  group: android-legacy-${{ github.ref }}
+  group: android-legacy-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

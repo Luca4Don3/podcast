@@ -3,13 +3,20 @@ name: desktop-preview
 on:
   workflow_dispatch:
   push:
-    branches: ['verify/desktop-*']
+    branches: [main]
+  pull_request:
+    paths:
+      - '.github/workflows/desktop-preview.yml'
+      - 'linux/**'
+      - 'macos/**'
+      - 'tests/build-linux-desktop.sh'
+      - 'apple/NativeCache/**'
 
 permissions:
   contents: read
 
 concurrency:
-  group: desktop-preview-${{ github.ref }}
+  group: desktop-preview-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
