@@ -1,0 +1,41 @@
+name: android-legacy-preview
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['verify/android-legacy-*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-legacy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Prepare Android build tools
+        run: |
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-35" "build-tools;35.0.0"
+      - name: Test feed parsing on the host JVM
+        run: bash tests/test-android-legacy-feed.sh
+      - name: Check Android 4.0 API usage and build preview
+        run: bash android/gradlew -p android/legacy --no-daemon lintDebug assembleDebug
+      - name: Verify manifest, DEX and Android 4.0 signature
+        run: bash tests/verify-android-legacy-apk.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-4.0-legacy-preview
+          path: output/legacy/podcast-lite-api14-preview.apk
+          if-no-files-found: error
+    39

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="legacy_title">Podcast</string>
+    <string name="legacy_local">Local file</string>
+    <string name="legacy_audio_url">Audio URL</string>
+    <string name="legacy_feed">Podcast feed</string>
+    <string name="legacy_import_opml">Import OPML</string>
+    <string name="legacy_cancel_feed">Cancel feed</string>
+    <string name="legacy_episodes">Episodes</string>
+    <string name="legacy_play">Play</string>
+    <string name="legacy_pause">Pause</string>
+    <string name="legacy_stop">Stop</string>
+    <string name="legacy_rewind">−30s</string>
+    <string name="legacy_forward">+30s</string>
+    <string name="legacy_seek">Playback position</string>
+    <string name="legacy_rewind_description">Back 30 seconds</string>
+    <string name="legacy_forward_description">Forward 30 seconds</string>
+    <string name="legacy_no_source">Nothing selected</string>
+    <string name="legacy_choose_source">Choose a file, audio URL, or feed.</string>
+    <string name="legacy_ready">Ready to play</string>
+    <string name="legacy_preparing">Opening audio…</string>
+    <string name="legacy_playing">Playing</string>
+    <string name="legacy_paused">Paused</string>
+    <string name="legacy_finished">Playback finished</string>
+    <string name="legacy_stopped">Stopped</string>
+    <string name="legacy_local_title">Local audio</string>
+    <string name="legacy_network_title">Audio URL</string>
+    <string name="legacy_no_picker">No file picker is installed. You can still play an audio URL or open a feed.</string>
+    <string name="legacy_local_error">Cannot read this file. Choose a readable audio file from the file picker.</string>
+    <string name="legacy_media_error">Cannot play this audio. Check the file, URL, format, or device network and TLS support.</string>
+    <string name="legacy_timeout">Opening audio timed out. Try again.</string>
+    <string name="legacy_focus_error">Another app is using audio. Press Play to try again.</string>
+    <string name="legacy_url_hint">https://…</string>
+    <string name="legacy_bad_url">Enter a public HTTP or HTTPS URL without credentials.</string>
+    <string name="legacy_no_feed">Open a public podcast feed to list its episodes.</string>
+    <string name="legacy_loading_feed">Loading feed…</string>
+    <string name="legacy_feed_cancelled">Feed load cancelled.</string>
+    <string name="legacy_feed_error">Could not open this feed. Check the URL, network, or device TLS support.</string>
+    <string name="legacy_feed_empty">This feed has no playable episodes.</string>
+    <string name="legacy_open">Open</string>
+    <string name="legacy_cancel">Cancel</string>
+    <string name="legacy_empty_episode">Untitled episode</string>
+    <string name="legacy_unknown_feed">Podcast feed</string>
+    <string name="legacy_time_pair">%1$s / %2$s</string>
+    <string name="legacy_unknown_time">--:--</string>
+</resources>

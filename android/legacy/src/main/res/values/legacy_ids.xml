@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="legacy_local" type="id" />
+    <item name="legacy_audio_url" type="id" />
+    <item name="legacy_feed" type="id" />
+    <item name="legacy_import_opml" type="id" />
+    <item name="legacy_cancel_feed" type="id" />
+    <item name="legacy_episodes" type="id" />
+    <item name="legacy_play" type="id" />
+    <item name="legacy_stop" type="id" />
+    <item name="legacy_rewind" type="id" />
+    <item name="legacy_forward" type="id" />
+    <item name="legacy_seek" type="id" />
+    <item name="legacy_url_input" type="id" />
+    <item name="legacy_play_status" type="id" />
+    <item name="legacy_feed_status" type="id" />
+</resources>

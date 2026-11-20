@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="legacy_title">播客</string>
+    <string name="legacy_local">本地文件</string>
+    <string name="legacy_audio_url">音频链接</string>
+    <string name="legacy_feed">播客订阅</string>
+    <string name="legacy_import_opml">导入 OPML</string>
+    <string name="legacy_cancel_feed">取消加载</string>
+    <string name="legacy_episodes">节目列表</string>
+    <string name="legacy_play">播放</string>
+    <string name="legacy_pause">暂停</string>
+    <string name="legacy_stop">停止</string>
+    <string name="legacy_rewind">−30 秒</string>
+    <string name="legacy_forward">+30 秒</string>
+    <string name="legacy_seek">播放进度</string>
+    <string name="legacy_rewind_description">后退 30 秒</string>
+    <string name="legacy_forward_description">前进 30 秒</string>
+    <string name="legacy_no_source">未选择音频</string>
+    <string name="legacy_choose_source">请选择本地文件、音频链接或播客订阅。</string>
+    <string name="legacy_ready">准备播放</string>
+    <string name="legacy_preparing">正在打开音频…</string>
+    <string name="legacy_playing">正在播放</string>
+    <string name="legacy_paused">已暂停</string>
+    <string name="legacy_finished">播放完毕</string>
+    <string name="legacy_stopped">已停止</string>
+    <string name="legacy_local_title">本地音频</string>
+    <string name="legacy_network_title">音频链接</string>
+    <string name="legacy_no_picker">未安装文件选择器，仍可播放音频链接或打开播客订阅。</string>
+    <string name="legacy_local_error">无法读取此文件。请使用文件选择器选择可读取的音频。</string>
+    <string name="legacy_media_error">无法播放此音频，请检查文件、链接、格式或设备的网络和 TLS 支持。</string>
+    <string name="legacy_timeout">打开音频超时，请重试。</string>
+    <string name="legacy_focus_error">其他应用正在使用音频，请按播放重试。</string>
+    <string name="legacy_url_hint">https://…</string>
+    <string name="legacy_bad_url">请输入无需凭据的公开 HTTP 或 HTTPS 链接。</string>
+    <string name="legacy_no_feed">请打开公开播客订阅以查看节目。</string>
+    <string name="legacy_loading_feed">正在加载播客订阅…</string>
+    <string name="legacy_feed_cancelled">已取消加载。</string>
+    <string name="legacy_feed_error">无法打开此播客订阅，请检查链接、网络或设备的 TLS 支持。</string>
+    <string name="legacy_feed_empty">此播客订阅没有可播放的节目。</string>
+    <string name="legacy_open">打开</string>
+    <string name="legacy_cancel">取消</string>
+    <string name="legacy_empty_episode">未命名节目</string>
+    <string name="legacy_unknown_feed">播客订阅</string>
+    <string name="legacy_time_pair">%1$s / %2$s</string>
+    <string name="legacy_unknown_time">--:--</string>
+</resources>
