@@ -3,7 +3,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#ifdef _WIN32
 #include <string>
+#endif
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN

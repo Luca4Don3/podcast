@@ -95,6 +95,29 @@ class PlatformFeedAdapterTest {
 
     // ---------- normalize: 拒绝项 ----------
 
+    @Test fun acceptsEnclosureUrlWithExplicitPortAndToken() {
+        val xml = """
+            <rss><channel><title>端口测试</title>
+              <item><title>单集</title>
+                <enclosure url="https://podcast.example.com:58743/media/episode.mp3?token=fixture-token"
+                           type="audio/mpeg" length="123"/>
+              </item>
+            </channel></rss>
+        """.trimIndent()
+        val feed = PlatformFeedAdapter.parseFeedXml(xml).getOrThrow()
+        assertEquals(
+            "https://podcast.example.com:58743/media/episode.mp3?token=fixture-token",
+            feed.items[0].audioUrl,
+        )
+    }
+
+    @Test fun acceptsHttpsUrlsWithExplicitPort() {
+        val ref = normalized("https://podcast.example.com:58743/rss/show.xml")
+                as FeedReference.DirectFeed
+        assertEquals("https://podcast.example.com:58743/rss/show.xml", ref.url)
+        assertEquals(ref.url, ref.fetchUrl)
+    }
+
     @Test fun rejectsNonHttpSchemes() {
         listOf(
             "ftp://example.com/rss.xml",
@@ -416,6 +439,40 @@ class PlatformFeedAdapterTest {
             <rss><channel><title>&xxe;</title></channel></rss>
         """.trimIndent()
         assertTrue(PlatformFeedAdapter.parseFeedXml(xml).isFailure)
+    }
+
+    @Test fun parseFeedXmlAcceptsDoctypeTextInCommentsInstructionsAndCdata() {
+        val xml = """
+            <?xml version="1.0"?>
+            <!-- <!DOCTYPE rss> -->
+            <?example <!DOCTYPE rss> ?>
+            <rss><channel>
+                <title>R &amp; D &#x3C; 3</title>
+                <description><![CDATA[Example: <!DOCTYPE rss>]]></description>
+            </channel></rss>
+        """.trimIndent()
+        val feed = PlatformFeedAdapter.parseFeedXml(xml).getOrThrow()
+        assertEquals("R & D < 3", feed.title)
+        assertEquals("Example: <!DOCTYPE rss>", feed.description)
+    }
+
+    @Test fun parseFeedXmlRejectsBareDoctypeAfterPrologMarkup() {
+        val xml = """
+            <?xml version="1.0"?>
+            <!-- ordinary comment -->
+            <?example instruction?>
+            <!DOCTYPE rss>
+            <rss><channel><title>Feed</title></channel></rss>
+        """.trimIndent()
+        assertTrue(PlatformFeedAdapter.parseFeedXml(xml).isFailure)
+    }
+
+    @Test fun parseOpmlRejectsDoctypeWithInternalEntity() {
+        val xml = """
+            <!DOCTYPE opml [<!ENTITY title "Example">]>
+            <opml><body><outline text="&title;" xmlUrl="https://example.invalid/feed.xml"/></body></opml>
+        """.trimIndent()
+        assertTrue(PlatformFeedAdapter.parseOpml(xml).isFailure)
     }
 
     @Test fun parseFeedXmlRejectsMalformedXml() {
