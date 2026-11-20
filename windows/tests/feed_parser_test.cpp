@@ -1,4 +1,5 @@
 #include "feed_parser.h"
+#include "http_client.h"
 
 #include <cstdio>
 #include <string_view>
@@ -87,6 +88,26 @@ void test_atom() {
         CHECK(prefixed.episodes[0].id == original.episodes[0].id);
         CHECK(prefixed.episodes[0].audio_url == "https://cdn.test/new.m4a");
         CHECK(prefixed.episodes[0].published_at == original.episodes[0].published_at + 86400);
+    }
+}
+
+void test_explicit_https_port() {
+    CHECK(valid_http_url("https://feed.example.test:8443/pod/rss.xml?format=xml"));
+    CHECK(valid_http_url("https://feed.example.test:8443/pod/atom.xml?format=xml"));
+    CHECK(!valid_http_url("https://user:pass@feed.example.test:8443/pod/rss.xml"));
+    const std::string enclosure = "https://feed.example.test:8443/media/audio.mp3";
+    const std::string xml[] = {
+        "<rss><channel><item><enclosure url='" + enclosure + "'/></item></channel></rss>",
+        "<feed xmlns='http://www.w3.org/2005/Atom'><entry><link rel='enclosure' href='" + enclosure + "'/></entry></feed>",
+    };
+    for (const auto& document : xml) {
+        ParsedFeed feed;
+        CHECK(parse_feed(document, feed));
+        CHECK(feed.episodes.size() == 1);
+        if (feed.episodes.size() == 1) {
+            CHECK(feed.episodes[0].audio_url == enclosure);
+            CHECK(valid_http_url(feed.episodes[0].audio_url));
+        }
     }
 }
 
@@ -180,6 +201,7 @@ void test_opml() {
 int main() {
     test_rss();
     test_atom();
+    test_explicit_https_port();
     test_invalid_xml();
     test_encodings_and_size();
     test_opml();

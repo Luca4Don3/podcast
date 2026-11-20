@@ -16,7 +16,10 @@ static gboolean test_urls(void)
 {
     g_autofree char *url = http_url("HTTPS://example.org/audio%20file.ogg?p=1#marker");
     CHECK(g_strcmp0(url, "https://example.org/audio%20file.ogg?p=1") == 0);
-    CHECK(!http_url("https://name:pass@example.org/a"));
+    g_clear_pointer(&url, g_free);
+    url = http_url("https://example.org:8443/pod/feed.xml?format=xml#marker");
+    CHECK(g_strcmp0(url, "https://example.org:8443/pod/feed.xml?format=xml") == 0);
+    CHECK(!http_url("https://name:pass@example.org:8443/a"));
     CHECK(!http_url("https://@example.org/a"));
     CHECK(!http_url("https:///no-host"));
     CHECK(!http_url("https://example.org/a\nb"));
@@ -33,19 +36,19 @@ static gboolean test_feeds(void)
         "<item><title>新闻 &amp; updates</title><enclosure url='first.png' type='image/png'/>"
         "<enclosure url='first.mp3' type='audio/mpeg'/></item></channel></rss>";
     g_autoptr(GError) error = NULL;
-    g_autoptr(GPtrArray) items = parse(rss, "https://example.org/rss/feed.xml", &error);
+    g_autoptr(GPtrArray) items = parse(rss, "https://example.org:8443/rss/feed.xml", &error);
     CHECK(!error && items && items->len == 1);
     FeedItem *item = g_ptr_array_index(items, 0);
     CHECK(item->kind == FEED_AUDIO && !strcmp(item->title, "新闻 & updates"));
-    CHECK(!strcmp(item->url, "https://example.org/rss/first.mp3"));
+    CHECK(!strcmp(item->url, "https://example.org:8443/rss/first.mp3"));
 
     g_clear_pointer(&items, g_ptr_array_unref);
-    items = parse("<feed xmlns='http://www.w3.org/2005/Atom' xml:base='https://example.org/'><entry>"
+    items = parse("<feed xmlns='http://www.w3.org/2005/Atom' xml:base='../media/'><entry>"
                   "<link rel='alternate' href='post.html'/><link rel='enclosure' href='file.ogg'/>"
-                  "</entry></feed>", NULL, &error);
+                  "</entry></feed>", "https://example.org:8443/atom/feed.xml", &error);
     CHECK(!error && items && items->len == 1);
     item = g_ptr_array_index(items, 0);
-    CHECK(item->kind == FEED_AUDIO && !strcmp(item->url, "https://example.org/file.ogg"));
+    CHECK(item->kind == FEED_AUDIO && !strcmp(item->url, "https://example.org:8443/media/file.ogg"));
     g_clear_pointer(&items, g_ptr_array_unref);
     items = parse("<opml version='2.0'><body><outline text='Folder'><outline text='Episode feed'"
                   " xmlUrl='https://example.org/feed.xml'/><outline xmlUrl='https://user@example.org/feed.xml'/>"
