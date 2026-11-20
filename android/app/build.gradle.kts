@@ -204,6 +204,8 @@ dependencies {
 
     debugImplementation(libs.androidx.ui.tooling)
     testImplementation(libs.junit)
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.okhttp.tls)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }
