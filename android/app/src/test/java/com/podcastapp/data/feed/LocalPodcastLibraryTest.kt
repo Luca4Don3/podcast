@@ -1,9 +1,16 @@
 package com.podcastapp.data.feed
 
 import com.podcastapp.data.remote.SettingsDto
+import com.sun.net.httpserver.HttpsConfigurator
+import com.sun.net.httpserver.HttpsServer
 import java.io.File
+import java.net.InetSocketAddress
 import java.nio.file.Files
+import java.security.KeyStore
 import java.util.Base64
+import java.util.concurrent.TimeUnit
+import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLContext
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -68,6 +75,85 @@ class LocalPodcastLibraryTest {
             assertEquals(imported.id, library.feeds.value.single().id)
         }
         assertTrue(File(dir, "local_podcast_library.json").exists())
+    }
+
+    @Test fun anonymousHttpsRssOnExplicitPortImportsAndReloadsEpisode() {
+        val dir = tempDir()
+        val (sslContext, certificatePem) = loopbackTls(dir)
+        val server = HttpsServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val origin = "https://127.0.0.1:${server.address.port}"
+        val feedUrl = "$origin/feed.xml"
+        val audioUrl = "$origin/episode.mp3"
+        val body = rss("Loopback podcast", "Loopback episode", audio = audioUrl).toByteArray(Charsets.UTF_8)
+        val imported = try {
+            server.httpsConfigurator = HttpsConfigurator(sslContext)
+            server.createContext("/feed.xml") { exchange ->
+                exchange.use {
+                    val headers = exchange.requestHeaders
+                    if (exchange.requestMethod != "GET" || exchange.requestURI.path != "/feed.xml") {
+                        exchange.sendResponseHeaders(404, -1)
+                    } else if (headers.containsKey("Authorization") || headers.containsKey("Cookie")) {
+                        exchange.sendResponseHeaders(400, -1)
+                    } else {
+                        exchange.responseHeaders.set("Content-Type", "application/rss+xml; charset=utf-8")
+                        exchange.sendResponseHeaders(200, body.size.toLong())
+                        exchange.responseBody.use { it.write(body) }
+                    }
+                }
+            }
+            server.start()
+            val library = LocalPodcastLibrary(dir, LocalPodcastLibrary.Companion::fetchHttpText, store(), 1)
+            runBlocking {
+                library.`import`(
+                    feedUrl,
+                    transport = SourceTransport(requireHttps = true, customCaPem = certificatePem),
+                ).getOrThrow().single()
+            }
+        } finally {
+            server.stop(0)
+        }
+        assertEquals(feedUrl, imported.feedUrl)
+        assertEquals("Loopback podcast", imported.podcast.title)
+        assertTrue(imported.podcast.subscribed)
+        val episode = imported.episodes.single()
+        assertEquals("Loopback episode", episode.title)
+        assertEquals("ep-1", episode.guid)
+        assertEquals(audioUrl, episode.audioUrl)
+        val reloaded = library(dir) { error("Reload should not fetch $it") }.feeds.value.single()
+        assertEquals(imported, reloaded)
+    }
+
+    private fun loopbackTls(dir: File): Pair<SSLContext, String> {
+        val store = File(dir, "loopback.p12")
+        val jdkBin = File(System.getProperty("java.home"), "bin")
+        val keytool = File(jdkBin, "keytool").takeIf { it.isFile } ?: File(jdkBin, "keytool.exe")
+        val password = "fixture-only"
+        val keys = try {
+            val process = ProcessBuilder(
+                keytool.absolutePath, "-genkeypair", "-alias", "loopback",
+                "-keyalg", "EC", "-groupname", "secp256r1", "-dname", "CN=PodcastApp Loopback Test",
+                "-ext", "SAN=IP:127.0.0.1", "-ext", "BC=ca:true", "-validity", "1",
+                "-keystore", store.absolutePath, "-storetype", "PKCS12", "-storepass", password,
+            ).redirectErrorStream(true).start()
+            try {
+                check(process.waitFor(15, TimeUnit.SECONDS)) { "keytool timed out" }
+                check(process.exitValue() == 0) { "keytool failed: ${process.inputStream.bufferedReader().use { it.readText() }}" }
+            } finally {
+                process.destroyForcibly()
+                process.inputStream.close()
+            }
+            KeyStore.getInstance("PKCS12").apply {
+                store.inputStream().use { load(it, password.toCharArray()) }
+            }
+        } finally {
+            Files.deleteIfExists(store.toPath())
+        }
+        val keyManagers = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
+            init(keys, password.toCharArray())
+        }
+        val context = SSLContext.getInstance("TLS").apply { init(keyManagers.keyManagers, null, null) }
+        val cert = Base64.getMimeEncoder(64, byteArrayOf(10)).encodeToString(keys.getCertificate("loopback").encoded)
+        return context to "-----BEGIN CERTIFICATE-----\n$cert\n-----END CERTIFICATE-----"
     }
 
     @Test fun reimportAndRefreshKeepStableLocalIdAndUpdateContent() {
