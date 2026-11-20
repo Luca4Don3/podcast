@@ -95,6 +95,22 @@ class PlatformFeedAdapterTest {
 
     // ---------- normalize: 拒绝项 ----------
 
+    @Test fun acceptsEnclosureUrlWithExplicitPortAndToken() {
+        val xml = """
+            <rss><channel><title>端口测试</title>
+              <item><title>单集</title>
+                <enclosure url="https://94040916.xyz:58743/media/a.mp3?token=cd3a3260022a"
+                           type="audio/mpeg" length="123"/>
+              </item>
+            </channel></rss>
+        """.trimIndent()
+        val feed = PlatformFeedAdapter.parseFeedXml(xml).getOrThrow()
+        assertEquals(
+            "https://94040916.xyz:58743/media/a.mp3?token=cd3a3260022a",
+            feed.items[0].audioUrl,
+        )
+    }
+
     @Test fun acceptsHttpsUrlsWithExplicitPort() {
         val ref = normalized("https://94040916.xyz:58743/rss/cd3a3260022a/xiaoyuehankehan.xml")
                 as FeedReference.DirectFeed
