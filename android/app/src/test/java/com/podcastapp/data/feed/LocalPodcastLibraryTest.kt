@@ -4,6 +4,7 @@ import com.podcastapp.data.remote.SettingsDto
 import java.io.File
 import java.net.InetAddress
 import java.nio.file.Files
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
