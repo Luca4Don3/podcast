@@ -23,9 +23,12 @@ sudo debootstrap --arch="$ABI" --foreign --variant=minbase --force-check-gpg \
 if [[ -n "${QEMU:-}" ]]; then
   sudo install -m 0755 "/usr/bin/qemu-$QEMU-static" "$root/usr/bin/"
 fi
-sudo mount -t proc proc "$root/proc"
-trap 'sudo umount -- "$root/proc"' EXIT
 sudo chroot "$root" /debootstrap/debootstrap --second-stage
+cleanup() {
+  if mountpoint -q "$root/proc"; then sudo umount -- "$root/proc"; fi
+}
+trap cleanup EXIT
+sudo mount -t proc proc "$root/proc"
 sudo chroot "$root" env DEBIAN_FRONTEND=noninteractive apt-get update -q
 sudo chroot "$root" env DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
   build-essential cmake pkg-config libgtk-3-dev libgstreamer1.0-dev libcurl4-openssl-dev libxml2-dev \
@@ -33,9 +36,8 @@ sudo chroot "$root" env DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-
 
 # The app and tests run without root. Do not copy repository metadata or credentials.
 sudo install -d -o 1000 -g 1000 "$root/work" "$root/work/home"
-sudo install -d "$root/work/source/apple"
+sudo install -d "$root/work/source"
 sudo cp -a linux "$root/work/source/"
-sudo cp -a apple/NativeCache "$root/work/source/apple/"
 sudo chroot --userspec=1000:1000 "$root" env HOME=/work/home LC_ALL=C.UTF-8 \
   bash -eu -c '
     test "$(dpkg --print-architecture)" = "$1"

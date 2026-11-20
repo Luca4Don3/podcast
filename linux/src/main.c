@@ -88,9 +88,10 @@ static void start_player(App *app, const char *source, gboolean remote)
         status(app, "Enter a credential-free HTTP(S) audio URL.");
         return;
     }
-    GstElement *pipeline = player_new(remote ? url : source, remote, FALSE);
+    g_autoptr(GError) error = NULL;
+    GstElement *pipeline = player_new(remote ? url : source, remote, FALSE, &error);
     if (!pipeline) {
-        status(app, "Open a readable audio file and install GStreamer base/good plugins and an audio output.");
+        status(app, error->message);
         return;
     }
     clear_player(app);
@@ -279,22 +280,32 @@ static void cancel_import(GtkButton *button, gpointer data)
     }
 }
 
-static void open_file(App *app, gboolean xml)
+static void file_response(GtkDialog *dialog, gint response, gpointer data)
 {
-    GtkWidget *dialog = gtk_file_chooser_dialog_new(xml ? "Import RSS, Atom or OPML" : "Open audio file",
-        GTK_WINDOW(app->window), GTK_FILE_CHOOSER_ACTION_OPEN, "_Cancel", GTK_RESPONSE_CANCEL,
-        "_Open", GTK_RESPONSE_ACCEPT, NULL);
-    gtk_file_chooser_set_local_only(GTK_FILE_CHOOSER(dialog), TRUE);
-    g_autofree char *name = NULL;
-    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT)
-        name = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
-    gtk_widget_destroy(dialog);
+    App *app = data;
+    gboolean xml = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(dialog), "import-xml"));
+    g_autofree char *name = response == GTK_RESPONSE_ACCEPT
+        ? gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog)) : NULL;
+    gtk_widget_destroy(GTK_WIDGET(dialog));
     if (name && !app->closed) {
         if (xml)
             start_import(app, name, TRUE);
         else
             start_player(app, name, FALSE);
     }
+}
+
+static void open_file(App *app, gboolean xml)
+{
+    GtkWidget *dialog = gtk_file_chooser_dialog_new(xml ? "Import RSS, Atom or OPML" : "Open audio file",
+        GTK_WINDOW(app->window), GTK_FILE_CHOOSER_ACTION_OPEN, "_Cancel", GTK_RESPONSE_CANCEL,
+        "_Open", GTK_RESPONSE_ACCEPT, NULL);
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+    gtk_window_set_destroy_with_parent(GTK_WINDOW(dialog), TRUE);
+    gtk_file_chooser_set_local_only(GTK_FILE_CHOOSER(dialog), TRUE);
+    g_object_set_data(G_OBJECT(dialog), "import-xml", GINT_TO_POINTER(xml));
+    g_signal_connect(dialog, "response", G_CALLBACK(file_response), app);
+    gtk_widget_show(dialog);
 }
 
 static void open_audio(GtkButton *button, gpointer data) { (void)button; open_file(data, FALSE); }

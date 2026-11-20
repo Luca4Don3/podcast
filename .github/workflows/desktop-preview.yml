@@ -68,7 +68,7 @@ jobs:
       - name: Verify slices and run tests natively
         run: |
           app=output/macos/podcast.app
-          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/podcast"
+          lipo "$app/Contents/MacOS/podcast" -verify_arch arm64 x86_64
           lipo -info "$app/Contents/MacOS/podcast"
           codesign --verify --strict "$app"
           ctest --test-dir output/macos --output-on-failure --no-tests=error

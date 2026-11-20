@@ -4,6 +4,6 @@
 #include <gst/gst.h>
 
 /* uri_or_path is a validated HTTP(S) URL for remote, or a filesystem path. */
-GstElement *player_new(const char *uri_or_path, gboolean remote, gboolean silent);
+GstElement *player_new(const char *uri_or_path, gboolean remote, gboolean silent, GError **error);
 void player_free(GstElement *pipeline);
 #endif

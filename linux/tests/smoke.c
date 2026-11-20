@@ -1,6 +1,7 @@
 #include "feed.h"
 #include "player.h"
 
+#include <glib/gstdio.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -95,20 +96,38 @@ static GBytes *wav_bytes(void)
     return g_bytes_new_take(wav, sizeof header + 32000);
 }
 
-G_DEFINE_AUTOPTR_CLEANUP_FUNC(FILE, fclose)
+static void remove_fixture(char *path)
+{
+    g_unlink(path);
+    g_free(path);
+}
+
+typedef char *FixturePath;
+G_DEFINE_AUTO_CLEANUP_FREE_FUNC(FixturePath, remove_fixture, NULL)
 
 static gboolean test_local_player(void)
 {
-    g_autoptr(FILE) file = tmpfile();
+    g_auto(FixturePath) path = NULL;
+    g_autoptr(GError) setup_error = NULL;
+    int fd = g_file_open_tmp("podcast-linux-XXXXXX.wav", &path, &setup_error);
+    if (fd < 0) {
+        g_printerr("WAV fixture: %s\n", setup_error->message);
+        return FALSE;
+    }
+    FILE *file = fdopen(fd, "wb");
+    if (!file)
+        g_close(fd, NULL);
     CHECK(file);
     g_autoptr(GBytes) wav = wav_bytes();
     gsize bytes;
     const void *audio = g_bytes_get_data(wav, &bytes);
-    CHECK(fwrite(audio, 1, bytes, file) == bytes && fflush(file) == 0);
-    char path[64];
-    g_snprintf(path, sizeof path, "/proc/self/fd/%d", fileno(file));
-    GstElement *pipe = player_new(path, FALSE, TRUE);
-    CHECK(pipe);
+    gboolean written = fwrite(audio, 1, bytes, file) == bytes;
+    CHECK(fclose(file) == 0 && written);
+    GstElement *pipe = player_new(path, FALSE, TRUE, &setup_error);
+    if (!pipe) {
+        g_printerr("Local WAV smoke: %s\n", setup_error->message);
+        return FALSE;
+    }
     gboolean ready = gst_element_set_state(pipe, GST_STATE_PAUSED) != GST_STATE_CHANGE_FAILURE
         && gst_element_get_state(pipe, NULL, NULL, 8 * GST_SECOND) == GST_STATE_CHANGE_SUCCESS;
     gint64 duration = 0;

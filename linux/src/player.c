@@ -39,30 +39,28 @@ static void no_more_pads(GstElement *decode, gpointer data)
         GST_ELEMENT_ERROR(decode, STREAM, WRONG_TYPE, ("No supported audio stream."), (NULL));
 }
 
-GstElement *player_new(const char *uri_or_path, gboolean remote, gboolean silent)
+GstElement *player_new(const char *uri_or_path, gboolean remote, gboolean silent, GError **error)
 {
     struct stat st;
-    if (!remote && (g_stat(uri_or_path, &st) != 0 || !S_ISREG(st.st_mode)))
+    if (!remote && (g_stat(uri_or_path, &st) != 0 || !S_ISREG(st.st_mode))) {
+        g_set_error_literal(error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_OPEN_READ,
+                            "Select a readable regular audio file.");
         return NULL;
+    }
 
     GstElement *pipeline = gst_pipeline_new(NULL);
-    GstElement *elements[] = {
-        gst_element_factory_make(remote ? "souphttpsrc" : "filesrc", NULL),
-        gst_element_factory_make("decodebin", NULL),
-        gst_element_factory_make("queue", NULL),
-        gst_element_factory_make("audioconvert", NULL),
-        gst_element_factory_make("audioresample", NULL),
-        gst_element_factory_make("volume", "playback-volume"),
-        gst_element_factory_make(silent ? "fakesink" : "autoaudiosink", NULL),
-    };
+    const char *factories[] = { remote ? "souphttpsrc" : "filesrc", "decodebin", "queue",
+                               "audioconvert", "audioresample", "volume", silent ? "fakesink" : "autoaudiosink" };
+    GstElement *elements[G_N_ELEMENTS(factories)];
     for (guint i = 0; i < G_N_ELEMENTS(elements); ++i) {
+        elements[i] = gst_element_factory_make(factories[i], i == 5 ? "playback-volume" : NULL);
         if (!elements[i]) {
-            for (guint j = 0; j < G_N_ELEMENTS(elements); ++j)
-                if (elements[j])
-                    gst_object_unref(elements[j]);
+            g_set_error(error, GST_CORE_ERROR, GST_CORE_ERROR_MISSING_PLUGIN,
+                        "Missing GStreamer element '%s'. Install GStreamer base/good plugins.", factories[i]);
             gst_object_unref(pipeline);
             return NULL;
         }
+        gst_bin_add(GST_BIN(pipeline), elements[i]);
     }
     GstElement *source = elements[0];
     GstElement *decode = elements[1];
@@ -74,10 +72,10 @@ GstElement *player_new(const char *uri_or_path, gboolean remote, gboolean silent
                      "timeout", 10u, "retries", 0, NULL);
     if (silent)
         g_object_set(elements[6], "sync", TRUE, NULL);
-    for (guint i = 0; i < G_N_ELEMENTS(elements); ++i)
-        gst_bin_add(GST_BIN(pipeline), elements[i]);
     if (!gst_element_link(source, decode)
         || !gst_element_link_many(queue, elements[3], elements[4], elements[5], elements[6], NULL)) {
+        g_set_error_literal(error, GST_CORE_ERROR, GST_CORE_ERROR_NEGOTIATION,
+                            "Could not link the GStreamer audio pipeline.");
         gst_object_unref(pipeline);
         return NULL;
     }
