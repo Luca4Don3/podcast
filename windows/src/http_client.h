@@ -1,6 +1,7 @@
 #ifndef PODCAST_HTTP_CLIENT_H
 #define PODCAST_HTTP_CLIENT_H
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -15,7 +16,9 @@ struct HttpResponse {
 
 // Only http/https are accepted. No userinfo. HTTPS certificate validation uses WinHTTP defaults.
 // max_bytes bounds the in-memory response. Returns false on transport/validation failure.
-bool http_get(const std::string& url, std::size_t max_bytes, HttpResponse& out);
+bool valid_http_url(const std::string& url);
+bool http_get(const std::string& url, std::size_t max_bytes, HttpResponse& out,
+              const std::atomic_bool* cancel = nullptr);
 
 // Stream a media file to disk with size limit; returns bytes written or -1.
 // The caller owns the destination path and must commit via the cache core.

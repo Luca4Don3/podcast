@@ -8,6 +8,8 @@
 namespace podcast {
 
 struct ParsedEpisode {
+    // Stable hash of RSS GUID / Atom id, or the enclosure URL when no source ID exists.
+    // This is not the legacy URL+title hash; persistent record migration is up to the caller.
     std::string id;
     std::string title;
     std::string audio_url;
@@ -25,9 +27,11 @@ struct OpmlEntry {
     std::string title;
 };
 
-// Strict, DTD-free XML scan. Returns false on DOCTYPE/ENTITY or malformed markup.
+// Parse up to 4 MiB of XML bytes (UTF-8 or UTF-16); DTDs are forbidden.
+// Return false without changing out on invalid input. Successful calls replace out.
 bool parse_rss(const std::string& xml, ParsedFeed& out);
 bool parse_atom(const std::string& xml, ParsedFeed& out);
+// Reject documents with more than 100 outlines containing nonempty xmlUrl attributes.
 bool parse_opml(const std::string& xml, std::vector<OpmlEntry>& out);
 
 // Detect the feed format from the root element and dispatch.

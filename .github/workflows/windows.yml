@@ -5,55 +5,96 @@ on:
   push:
     branches:
       - 'verify/windows-*'
+  pull_request:
+    paths:
+      - '.github/workflows/windows.yml'
+      - 'windows/**'
+      - 'apple/NativeCache/**'
 
 permissions:
   contents: read
 
 concurrency:
-  group: windows-${{ github.ref }}
+  group: windows-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Native Win32 x64 and ARM64
-    runs-on: windows-latest
+    # Same-repo verification branches already run on push; forks still need PR CI.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name != github.repository ||
+      !startsWith(github.head_ref, 'verify/windows-')
+    name: Native Win32 ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+            pe_machine: '8664'
+            artifact: windows-x64
+          - arch: ARM64
+            runner: windows-11-arm
+            pe_machine: 'AA64'
+            artifact: windows-arm64
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TARGET_ARCH: ${{ matrix.arch }}
+      PE_MACHINE: ${{ matrix.pe_machine }}
     steps:
+      - name: Verify native runner architecture
+        run: |
+          $osArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          $processArch = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
+          Write-Output "Runner=$env:RUNNER_ARCH OS=$osArch PowerShell=$processArch target=$env:TARGET_ARCH"
+          if ($env:RUNNER_ARCH -ne $env:TARGET_ARCH -or $osArch -ne $env:TARGET_ARCH -or $processArch -ne $env:TARGET_ARCH) {
+            throw "Expected a native $env:TARGET_ARCH runner and PowerShell process."
+          }
       - uses: actions/checkout@v4
-      - name: Configure x64
-        run: cmake -S windows -B windows/build-x64 -A x64
-      - name: Build x64
-        run: cmake --build windows/build-x64 --config Release --parallel 2
-      - name: Run Windows cache tests
-        run: ctest --test-dir windows/build-x64 -C Release --output-on-failure
-      - name: Configure ARM64 cross-build
-        run: cmake -S windows -B windows/build-arm64 -A ARM64
-      - name: Build ARM64
-        run: cmake --build windows/build-arm64 --config Release --parallel 2
-      - name: Check artifacts
-        shell: pwsh
+        with:
+          persist-credentials: false
+      - name: Configure
+        run: cmake -S windows -B windows/build -A $env:TARGET_ARCH -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build windows/build --config Release --parallel 2
+      - name: Verify executable PE Machine types
         run: |
-          $x64 = Get-Item windows/build-x64/Release/podcast.exe
-          $arm = Get-Item windows/build-arm64/Release/podcast.exe
-          if (-not $x64 -or -not $arm) { throw 'missing executables' }
-          Write-Output "x64 $($x64.Length) bytes"
-          Write-Output "ARM64 $($arm.Length) bytes"
-      - name: Stage x64 executable
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force windows/dist/x64 | Out-Null
-          Copy-Item windows/build-x64/Release/podcast.exe windows/dist/x64/podcast.exe
-      - name: Stage ARM64 executable
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force windows/dist/arm64 | Out-Null
-          Copy-Item windows/build-arm64/Release/podcast.exe windows/dist/arm64/podcast.exe
+          $release = 'windows/build/Release'
+          $expected = [Convert]::ToUInt16($env:PE_MACHINE, 16)
+          if (-not (Test-Path -LiteralPath "$release/podcast.exe" -PathType Leaf)) {
+            throw 'Missing podcast.exe'
+          }
+          foreach ($exe in (Get-ChildItem -LiteralPath $release -Filter '*.exe' -File)) {
+            $reader = [System.IO.BinaryReader]::new($exe.OpenRead())
+            try {
+              if ($reader.BaseStream.Length -lt 64 -or $reader.ReadUInt16() -ne 0x5A4D) {
+                throw "Invalid DOS header: $($exe.Name)"
+              }
+              $reader.BaseStream.Position = 0x3C
+              $peOffset = $reader.ReadUInt32()
+              if ($peOffset -lt 64 -or $peOffset -gt ($reader.BaseStream.Length - 6)) {
+                throw "Invalid PE header offset: $($exe.Name)"
+              }
+              $reader.BaseStream.Position = $peOffset
+              if ($reader.ReadUInt32() -ne 0x00004550) {
+                throw "Invalid PE signature: $($exe.Name)"
+              }
+              $machine = $reader.ReadUInt16()
+              $report = '{0}: PE Machine 0x{1:X4}, expected 0x{2:X4}' -f $exe.Name, $machine, $expected
+              if ($machine -ne $expected) { throw $report }
+              Write-Output $report
+            } finally {
+              $reader.Dispose()
+            }
+          }
+      - name: Run Windows tests (including startup)
+        run: ctest --test-dir windows/build -C Release --output-on-failure --no-tests=error
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-x64
-          path: windows/dist/x64/podcast.exe
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-arm64
-          path: windows/dist/arm64/podcast.exe
+          name: ${{ matrix.artifact }}
+          path: windows/build/Release/podcast.exe
           if-no-files-found: error

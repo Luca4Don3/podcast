@@ -1,6 +1,8 @@
 #ifndef PODCAST_LIBRARY_CORE_H
 #define PODCAST_LIBRARY_CORE_H
 
+// The SwiftPM C umbrella must not import this C++-only interface.
+#ifdef __cplusplus
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -59,5 +61,6 @@ private:
 Progress resume(const Progress& saved, bool finished);
 
 } // namespace podcast
+#endif // __cplusplus
 
 #endif
