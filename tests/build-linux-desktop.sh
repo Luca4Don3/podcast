@@ -9,6 +9,7 @@ esac
 
 packages=(debootstrap debian-archive-keyring)
 if [[ -n "${QEMU:-}" ]]; then packages+=(qemu-user-static binfmt-support); fi
+if [[ "$ABI" == mips64el ]]; then packages+=(xvfb xauth); fi
 sudo apt-get update -q
 sudo apt-get install -yq --no-install-recommends "${packages[@]}"
 if [[ -n "${QEMU:-}" ]]; then
@@ -25,14 +26,17 @@ if [[ -n "${QEMU:-}" ]]; then
 fi
 sudo chroot "$root" /debootstrap/debootstrap --second-stage
 cleanup() {
+  if mountpoint -q "$root/tmp/.X11-unix"; then sudo umount -- "$root/tmp/.X11-unix"; fi
   if mountpoint -q "$root/proc"; then sudo umount -- "$root/proc"; fi
 }
 trap cleanup EXIT
 sudo mount -t proc proc "$root/proc"
 sudo chroot "$root" env DEBIAN_FRONTEND=noninteractive apt-get update -q
+display_packages=(xvfb xauth)
+if [[ "$ABI" == mips64el ]]; then display_packages=(); fi
 sudo chroot "$root" env DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
   build-essential cmake pkg-config libgtk-3-dev libgstreamer1.0-dev libcurl4-openssl-dev libxml2-dev \
-  gstreamer1.0-plugins-base gstreamer1.0-plugins-good glib-networking ca-certificates xvfb xauth
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good glib-networking ca-certificates "${display_packages[@]}"
 
 # The app and tests run without root. Do not copy repository metadata or credentials.
 sudo install -d -o 1000 -g 1000 "$root/work" "$root/work/home"
@@ -46,6 +50,22 @@ sudo chroot --userspec=1000:1000 "$root" env HOME=/work/home LC_ALL=C.UTF-8 \
     ctest --test-dir /work/build --output-on-failure --no-tests=error
     cmake --install /work/build --prefix /work/stage
   ' bash "$ABI"
+
+# QEMU MIPS64 runs the target GTK binary, but Xvfb itself runs on the host.
+# Use a private MIT cookie and share only the X server's Unix socket directory.
+if [[ "$ABI" == mips64el ]]; then
+  sudo test -d /tmp/.X11-unix || sudo install -d -m 1777 /tmp/.X11-unix
+  sudo install -d -m 1777 "$root/tmp/.X11-unix"
+  sudo mount --bind /tmp/.X11-unix "$root/tmp/.X11-unix"
+  xvfb-run -a -s '-screen 0 1024x768x24 -nolisten tcp -extension MIT-SHM' -e /dev/stderr \
+    bash -eu -c '
+      sudo install -o 1000 -g 1000 -m 0600 "$XAUTHORITY" "$1/work/home/Xauthority"
+      printf "%s\n" "MIPS64el GTK window smoke (QEMU client, host Xvfb)"
+      sudo chroot --userspec=1000:1000 "$1" env HOME=/work/home LC_ALL=C.UTF-8 \
+        DISPLAY="$DISPLAY" XAUTHORITY=/work/home/Xauthority GDK_BACKEND=x11 G_DEBUG=fatal-warnings \
+        /work/stage/bin/podcast-linux --window-smoke-test
+    ' bash "$root"
+fi
 
 exe="$root/work/stage/bin/podcast-linux"
 readelf -h "$exe"
