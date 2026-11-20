@@ -1,12 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
     <!--
-      部分公开播客源只提供 http（内网 / 无域名），这里放开明文；
-      建议优先使用 https，用户可为单个来源开启“仅允许 HTTPS”以禁止 http。
+      Public podcast sources may still be HTTP; HTTPS is recommended and can be
+      enforced per source. System trust anchors remain authoritative; the bundled
+      ISRG roots only extend trust to older Android devices whose system store
+      predates Let's Encrypt's newer public roots. They do not disable hostname
+      or chain validation.
     -->
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
+            <certificates src="@raw/isrg_root_x1" />
+            <certificates src="@raw/isrg_root_x2" />
+            <certificates src="@raw/isrg_root_ye" />
         </trust-anchors>
     </base-config>
 </network-security-config>

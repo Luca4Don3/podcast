@@ -33,7 +33,7 @@
 
 ## 传输、认证与键盘
 
-默认同时支持 http 与 https，建议优先使用 https；只有用户为某个来源勾选“仅允许 HTTPS”时才拒绝 http 地址与降级跳转。Android 的 Cleartext 策略与 Apple 的 ATS 已允许 HTTP；自定义 CA、mTLS、Digest 与 Basic/Bearer/API Key 均为可选，凭据只随对应来源请求发送。
+默认同时支持 http 与 https，建议优先使用 https；只有用户为某个来源勾选“仅允许 HTTPS”时才拒绝 http 地址与降级跳转。Android 的 Cleartext 策略与 Apple 的 ATS 已允许 HTTP；自定义 CA、mTLS、Digest 与 Basic/Bearer/API Key 均为可选，凭据只随对应来源请求发送。Android 另外内置 Let’s Encrypt 的 ISRG Root X1/X2 和 Root YE 公共根证书，用于系统根库较旧的设备；校验仍要求域名匹配和完整证书链，不信任用户安装的任意 CA。
 
 每来源的认证材料可来自 URL userinfo/token/api_key，也可单独填写。凭据、证书私钥与传输材料按来源加密保存，跨主机/端口变化/HTTPS 降级时会剥离。
 

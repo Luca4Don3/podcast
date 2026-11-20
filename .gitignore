@@ -30,21 +30,12 @@ deploy/server.env
 Thumbs.db
     28
 (shown up to 2000 lines; use startLine/endLine to page)
-# Generated files and local secrets
-dist/
-android/.kotlin/
-android/app/.cxx/
-__pycache__/
-*.pyc
-*.tmp
-*.pem
-*.p12
-.env.*
-!.env.example
-
-# Apple build outputs
+# Apple local build and user settings
 apple/.build/
 apple/.swiftpm/
 apple/**/xcuserdata/
 *.xcuserstate
 /output/
+
+# Public CA trust anchors bundled as Android resources, not private keys.
+!android/app/src/main/res/raw/*.pem

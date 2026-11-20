@@ -468,7 +468,7 @@ fun DiscoverScreen(
 
         Text("传输加密（可选）", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium)
         Text(
-            "默认同时支持 http 与 https，建议优先使用 https。只有勾选“仅允许 HTTPS”时才会拒绝 http 地址及降级跳转；跨主机或降级跳转仍会剥离认证与客户端证书。",
+            "默认同时支持 http 与 https，建议优先使用 https。只有勾选“仅允许 HTTPS”时才会拒绝 http 地址及降级跳转；跨主机或降级跳转仍会剥离认证与客户端证书。系统根证书之外还内置 Let’s Encrypt 公共根证书，用于旧设备的 HTTPS 订阅。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
