@@ -95,6 +95,16 @@ class PlatformFeedAdapterTest {
 
     // ---------- normalize: 拒绝项 ----------
 
+    @Test fun acceptsHttpsUrlsWithExplicitPort() {
+        val ref = normalized("https://94040916.xyz:58743/rss/cd3a3260022a/xiaoyuehankehan.xml")
+                as FeedReference.DirectFeed
+        assertEquals("https://94040916.xyz:58743/rss/cd3a3260022a/xiaoyuehankehan.xml", ref.url)
+        assertEquals(ref.url, ref.fetchUrl)
+
+        val portZero = normalized("https://example.com:0/feed") as FeedReference.DirectFeed
+        assertEquals("https://example.com:0/feed", portZero.url)
+    }
+
     @Test fun rejectsNonHttpSchemes() {
         listOf(
             "ftp://example.com/rss.xml",
