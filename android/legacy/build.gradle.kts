@@ -29,5 +29,8 @@ android {
 
     lint {
         abortOnError = true
+        // Leanback launcher is declared for set-top boxes; a branded TV banner
+        // is a distribution asset and is not part of this side-load preview.
+        disable += "MissingTvBanner"
     }
 }
