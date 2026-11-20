@@ -8,7 +8,7 @@ if [[ -z "$kxml" ]]; then
   kxml=$(find "$HOME/.gradle/caches" -name 'kxml2-2.3.0.jar' -print -quit 2>/dev/null || true)
 fi
 [[ -n "$kxml" ]] || { printf 'kxml2 2.3.0 not found in SDK or Gradle cache\n' >&2; exit 1; }
-work=$(mktemp -d "$PWD/.temp/legacy-feed-test.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/legacy-feed-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 javac -cp "$kxml" -d "$work" \
   android/legacy/src/main/java/com/podcastapp/legacy/FeedRepository.java \
