@@ -10,9 +10,11 @@ static PDImport *parse(NSString *xml, NSURL *base = nil) {
 int main() {
     @autoreleasepool {
         int failures = 0;
-        NSURL *base = [NSURL URLWithString:@"https://example.test/pod/feed.xml"];
+        NSURL *base = PDWebURL(@"https://example.test:8443/pod/feed.xml?format=xml", nil);
+        CHECK([base.scheme isEqualToString:@"https"] && [base.host isEqualToString:@"example.test"]);
+        CHECK(base.port.integerValue == 8443 && [base.query isEqualToString:@"format=xml"]);
         CHECK([PDWebURL(@"  http://example.test/a  ", nil).host isEqualToString:@"example.test"]);
-        CHECK(!PDWebURL(@"https://user:pass@example.test/a", nil));
+        CHECK(!PDWebURL(@"https://user:pass@example.test:8443/a", nil));
         CHECK(!PDWebURL(@"file:///tmp/audio.mp3", nil));
         CHECK(!PDWebURL(@"../audio.mp3", nil));
         CHECK(!PDWebURL(@"http:audio.mp3", nil));
@@ -27,23 +29,23 @@ int main() {
         CHECK([rss.title isEqualToString:@"Music & Talk"]);
         CHECK(rss.episodes.count == 2 && !rss.isOPML);
         CHECK([rss.episodes.firstObject.title isEqualToString:@"First & Best"]);
-        CHECK([rss.episodes.firstObject.url.absoluteString isEqualToString:@"https://example.test/pod/ep.mp3?x=1&y=2"]);
+        CHECK([rss.episodes.firstObject.url.absoluteString isEqualToString:@"https://example.test:8443/pod/ep.mp3?x=1&y=2"]);
         CHECK([rss.episodes.lastObject.title isEqualToString:@"two.m4a"]);
 
-        PDImport *atom = parse(@"<a:feed xmlns:a='http://www.w3.org/2005/Atom' xml:base='https://cdn.example.test/'>"
+        PDImport *atom = parse(@"<a:feed xmlns:a='http://www.w3.org/2005/Atom' xml:base='../media/'>"
                               "<a:title>Atom</a:title><a:entry><a:id>x</a:id><a:title>First atom</a:title>"
                               "<a:link href='show.html'/><a:link rel='enclosure' type='audio/mpeg' href='episode.mp3'/>"
                               "</a:entry></a:feed>", base);
         CHECK([atom.title isEqualToString:@"Atom"]);
         CHECK(atom.episodes.count == 1);
-        CHECK([atom.episodes.firstObject.url.absoluteString isEqualToString:@"https://cdn.example.test/episode.mp3"]);
+        CHECK([atom.episodes.firstObject.url.absoluteString isEqualToString:@"https://example.test:8443/media/episode.mp3"]);
         CHECK(!parse(@"<feed><entry/></feed>"));
 
         PDImport *opml = parse(@"<opml version='2.0'><head/><body><outline text='Group'>"
                               "<outline xmlUrl='https://example.test/rss'/><outline xmlUrl='https://example.test/rss'/>"
                               "<outline xmlUrl='../feed'/><outline xmlUrl='file:///private.xml'/></outline></body></opml>", base);
         CHECK(opml.isOPML && opml.feeds.count == 2);
-        CHECK([opml.feeds.lastObject.absoluteString isEqualToString:@"https://example.test/feed"]);
+        CHECK([opml.feeds.lastObject.absoluteString isEqualToString:@"https://example.test:8443/feed"]);
         NSMutableString *large = [NSMutableString stringWithString:@"<opml><body>"];
         for (int i = 0; i < 100; ++i) [large appendString:@"<outline xmlUrl='https://example.test/rss'/>"];
         CHECK(parse([large stringByAppendingString:@"</body></opml>"]).isOPML);

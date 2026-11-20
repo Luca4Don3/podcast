@@ -278,6 +278,73 @@ final class FeedAdapterTests: XCTestCase {
 
     // MARK: - XML attack surface
 
+    func testAnonymousRSSAndAtomUseExplicitHTTPSPort() throws {
+        let fixtures = [
+            ("rss", "<rss><channel><title>Synthetic RSS</title><item><title>One</title><enclosure url=\"https://feeds.example.invalid:8443/one.mp3\"/></item></channel></rss>"),
+            ("atom", "<feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Synthetic Atom</title><entry><title>One</title><link rel=\"enclosure\" href=\"https://feeds.example.invalid:8443/one.mp3\"/></entry></feed>"),
+        ]
+        for (format, xml) in fixtures {
+            let input = "https://feeds.example.invalid:8443/\(format)?page=2"
+            guard case .directFeed(let url, let credentials) = try PlatformFeedAdapter.normalize(input),
+                  case .feed(let feed) = try PlatformFeedAdapter.parseSubscriptionDocument(Data(xml.utf8)) else {
+                return XCTFail("Expected a direct feed")
+            }
+            XCTAssertEqual(url.absoluteString, input)
+            XCTAssertEqual(url.port, 8443)
+            XCTAssertTrue(SourceTransport(requireHttps: true).allows(url))
+            XCTAssertEqual(credentials.kind, .none)
+            XCTAssertTrue(credentials.httpHeaders.isEmpty)
+            XCTAssertEqual(feed.episodes.first?.audioUrl.port, 8443)
+        }
+    }
+
+    func testParsesLiteralDeclarationAndOPMLTextInCommentsInstructionsAndCDATA() throws {
+        let xml = """
+        <?xml version="1.0"?>
+        <!-- <!DOCTYPE rss> <opml> -->
+        <?example <!DOCTYPE rss> ?>
+        <rss><channel>
+            <title>R &amp; D &#x3C; 3</title>
+            <description>前 <![CDATA[<!DOCTYPE rss> <!ENTITY example> <opml>]]> 后</description>
+        </channel></rss>
+        """
+        guard case .feed(let feed) = try PlatformFeedAdapter.parseSubscriptionDocument(Data(xml.utf8)) else {
+            return XCTFail("Expected RSS rather than OPML")
+        }
+        XCTAssertEqual(feed.title, "R & D < 3")
+        XCTAssertEqual(feed.description, "前 <!DOCTYPE rss> <!ENTITY example> <opml> 后")
+    }
+
+    func testRejectsRealDoctypeAndEntityAcrossXMLEncodings() throws {
+        let encodings: [(String.Encoding, String)] = [(.utf8, "UTF-8"), (.utf16, "UTF-16"),
+            (.utf16BigEndian, "UTF-16BE"), (.utf16LittleEndian, "UTF-16LE"),
+            (.utf32BigEndian, "UTF-32BE"), (.utf32LittleEndian, "UTF-32LE"), (.isoLatin1, "ISO-8859-1")]
+        for (encoding, name) in encodings {
+            let prolog = "<?xml version=\"1.0\" encoding=\"\(name)\" standalone=\"yes\"?><!-- comment --><?example instruction?>"
+            let rss = "<rss><channel><title>Café</title></channel></rss>"
+            let data = try XCTUnwrap((prolog + rss).data(using: encoding))
+            XCTAssertEqual(try PlatformFeedAdapter.parseFeed(data).title, "Café", name)
+            let denied = try XCTUnwrap((prolog + "<!DOCTYPE rss>" + rss).data(using: encoding))
+            assertAdapterError(.externalEntityForbidden) { _ = try PlatformFeedAdapter.parseFeed(denied) }
+            let opml = prolog + "<!DOCTYPE opml [<!ENTITY title 'Sample'>]>" +
+                "<opml><body><outline title=\"&title;\" xmlUrl=\"https://feeds.example.invalid:8443/rss\"/></body></opml>"
+            let deniedOPML = try XCTUnwrap(opml.data(using: encoding))
+            assertAdapterError(.externalEntityForbidden) { _ = try PlatformFeedAdapter.parseOPML(deniedOPML) }
+        }
+    }
+
+    func testClassifiesOPMLByRootEvenAfterLongPrologAndUTF16() throws {
+        let comment = String(repeating: "x", count: 4096)
+        let xml = "<?xml version='1.0' encoding='UTF-16'?> <!--\(comment)-->" +
+            "<opml><body><outline title='Café' xmlUrl='https://feeds.example.invalid:8443/rss'/></body></opml>"
+        let data = try XCTUnwrap(xml.data(using: .utf16))
+        guard case .opml(let feeds) = try PlatformFeedAdapter.parseSubscriptionDocument(data) else {
+            return XCTFail("Expected OPML")
+        }
+        XCTAssertEqual(feeds.first?.title, "Café")
+        XCTAssertEqual(feeds.first?.url.port, 8443)
+    }
+
     func testParseFeedRejectsExternalAndInternalEntities() {
         let external = """
 <!DOCTYPE rss [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>

@@ -5,14 +5,13 @@ import java.net.URI
 import java.net.URLDecoder
 import java.net.URISyntaxException
 import java.util.Locale
-import javax.xml.XMLConstants
-import javax.xml.parsers.DocumentBuilder
 import javax.xml.parsers.DocumentBuilderFactory
 import org.w3c.dom.Attr
 import org.w3c.dom.Document
 import org.w3c.dom.Element
 import org.xml.sax.ErrorHandler
 import org.xml.sax.InputSource
+import org.xml.sax.SAXException
 import org.xml.sax.SAXParseException
 
 /**
@@ -322,25 +321,18 @@ object PlatformFeedAdapter {
     private fun parseDocument(xml: String): Document {
         require(xml.length <= MAX_XML_CHARS) { "XML input exceeds the 4 MiB limit" }
         require(xml.isNotBlank()) { "XML input is blank" }
-        val factory = DocumentBuilderFactory.newInstance().apply {
+        rejectDoctype(xml)
+        val builder = DocumentBuilderFactory.newInstance().apply {
             isNamespaceAware = true
             isValidating = false
-            setFeatureStrict(this, XMLConstants.FEATURE_SECURE_PROCESSING, true)
-            setFeatureStrict(this, "http://apache.org/xml/features/disallow-doctype-decl", true)
-            setFeatureStrict(this, "http://xml.org/sax/features/external-general-entities", false)
-            setFeatureStrict(this, "http://xml.org/sax/features/external-parameter-entities", false)
-            setFeatureStrict(this, "http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
+            isExpandEntityReferences = false
             try {
                 isXIncludeAware = false
             } catch (_: UnsupportedOperationException) {
-                Unit
+                // Providers without XInclude support leave it disabled.
             }
-            isExpandEntityReferences = false
-            // Android's javax.xml.XMLConstants does not expose these property names.
-            trySetAttribute(this, "http://javax.xml.XMLConstants/property/accessExternalDTD", "")
-            trySetAttribute(this, "http://javax.xml.XMLConstants/property/accessExternalSchema", "")
-        }
-        val builder: DocumentBuilder = factory.newDocumentBuilder()
+        }.newDocumentBuilder()
+        builder.setEntityResolver { _, _ -> throw SAXException("External XML entities are not allowed") }
         builder.setErrorHandler(object : ErrorHandler {
             override fun warning(e: SAXParseException) = Unit
             override fun error(e: SAXParseException) { throw e }
@@ -349,20 +341,27 @@ object PlatformFeedAdapter {
         return builder.parse(InputSource(StringReader(xml)))
     }
 
-    private fun setFeatureStrict(factory: DocumentBuilderFactory, name: String, value: Boolean) {
-        try {
-            factory.setFeature(name, value)
-        } catch (e: Exception) {
-            throw IllegalStateException("Required secure XML feature is unavailable: $name", e)
+    // Android's DOM provider does not implement Xerces' DOCTYPE feature. Reject
+    // the declaration before handing the same characters to either provider.
+    private fun rejectDoctype(xml: String) {
+        var next = 0
+        while (true) {
+            val start = xml.indexOf('<', next)
+            if (start < 0) return
+            next = when {
+                xml.startsWith("<!DOCTYPE", start) -> throw SAXException("XML DOCTYPE declarations are not allowed")
+                xml.startsWith("<!--", start) -> skipXmlSection(xml, start + 4, "-->")
+                xml.startsWith("<?", start) -> skipXmlSection(xml, start + 2, "?>")
+                xml.startsWith("<![CDATA[", start) -> skipXmlSection(xml, start + 9, "]]>")
+                else -> start + 1
+            }
         }
     }
 
-    private fun trySetAttribute(factory: DocumentBuilderFactory, name: String, value: String) {
-        try {
-            factory.setAttribute(name, value)
-        } catch (_: Exception) {
-            Unit
-        }
+    private fun skipXmlSection(xml: String, from: Int, terminator: String): Int {
+        val end = xml.indexOf(terminator, from)
+        if (end < 0) throw SAXException("Unterminated XML markup")
+        return end + terminator.length
     }
 
     private fun Element.isNamed(name: String): Boolean =

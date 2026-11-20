@@ -673,7 +673,7 @@ private enum FeedHTTP {
         defer { session.finishTasksAndInvalidate() }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         request.httpShouldHandleCookies = false
-        request.setValue("application/rss+xml, application/xml, text/xml, application/json;q=0.9, */*;q=0.5",
+        request.setValue("application/rss+xml, application/atom+xml, application/xml, text/xml, application/json;q=0.9, */*;q=0.5",
                          forHTTPHeaderField: "Accept")
         // Basic/Bearer/API Key only; Digest has no static header and is answered on challenge.
         for (field, value) in credentials.httpHeaders { request.setValue(value, forHTTPHeaderField: field) }
@@ -1198,10 +1198,11 @@ private final class LibrarySession: ObservableObject {
                         author: String, titleHint: String?) async throws {
         let data = try await FeedHTTP.data(from: url, credentials: credentials, transport: transport,
                                            limit: FeedHTTP.maximumFeedBytes)
-        if Self.looksLikeOPML(data) {
-            let outlines: [OpmlFeed]
-            do { outlines = try PlatformFeedAdapter.parseOPML(data) }
-            catch { throw Self.adapterError(error) }
+        let document: PlatformFeedAdapter.SubscriptionDocument
+        do { document = try PlatformFeedAdapter.parseSubscriptionDocument(data) }
+        catch { throw Self.adapterError(error) }
+        switch document {
+        case .opml(let outlines):
             guard !outlines.isEmpty else { throw FeedAddError.malformedOPML }
             for outline in outlines {
                 try Task.checkCancellation()
@@ -1227,10 +1228,7 @@ private final class LibrarySession: ObservableObject {
                 ingestSingle(feedURL, parsed: parsed, credentials: feedCredentials,
                              transport: outlineTransport, author: "", titleHint: outline.title)
             }
-        } else {
-            let parsed: ParsedFeed
-            do { parsed = try PlatformFeedAdapter.parseFeed(data) }
-            catch { throw Self.adapterError(error) }
+        case .feed(let parsed):
             ingestSingle(url, parsed: parsed, credentials: credentials, transport: transport,
                          author: author, titleHint: titleHint)
         }
@@ -1274,11 +1272,6 @@ private final class LibrarySession: ObservableObject {
             libraryError = "无法保存本地订阅，请检查设备存储空间。"
             return false
         }
-    }
-
-    private static func looksLikeOPML(_ data: Data) -> Bool {
-        let head = String(decoding: data.prefix(4096), as: UTF8.self)
-        return head.range(of: "<opml", options: .caseInsensitive) != nil
     }
 
     private static func adapterError(_ error: Error) -> FeedAddError {
@@ -1375,7 +1368,7 @@ private struct AddSourceView: View {
             Form {
                 Section("播客源地址") {
                     inputRow("RSS / Atom / OPML 或分享链接") {
-                        TextField("https://example.com/feed.xml", text: $input)
+                        TextField("https://feeds.example.invalid:8443/feed.xml", text: $input)
                             .keyboardType(.URL)
                             .textContentType(.URL)
                             .textInputAutocapitalization(.never)
@@ -1384,11 +1377,13 @@ private struct AddSourceView: View {
                             .submitLabel(.go)
                             .onSubmit(submit)
                     }
+                    Text("无需登录 App。公开 RSS / Atom 只需填写直连地址，可包含 HTTPS 端口。")
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
                 .disabled(library.isFetching)
-                Section("认证（可选）") {
-                    Picker("认证方式", selection: $authKind) {
-                        Text("无").tag(CredentialKind.none)
+                Section("来源认证（仅私有源需要）") {
+                    Picker("来源认证方式", selection: $authKind) {
+                        Text("无（匿名）").tag(CredentialKind.none)
                         Text("Basic").tag(CredentialKind.basic)
                         Text("Bearer").tag(CredentialKind.bearer)
                         Text("API Key").tag(CredentialKind.apiKey)

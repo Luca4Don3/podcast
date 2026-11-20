@@ -1,4 +1,8 @@
+import CoreFoundation
 import Foundation
+#if canImport(FoundationXML)
+import FoundationXML
+#endif
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -567,55 +571,130 @@ public enum PlatformFeedAdapter {
         }
     }
 
-    // MARK: - Feed parsing
+    // MARK: - Feed and OPML parsing
 
-    public static func parseFeed(_ data: Data) throws -> ParsedFeed {
-        try XMLInput.check(data, malformed: .malformedFeed)
-        let delegate = FeedParserDelegate()
-        let parser = XMLInput.parser(for: data)
-        parser.delegate = delegate
-        guard parser.parse(), delegate.failure == nil else {
-            throw delegate.failure ?? FeedAdapterError.malformedFeed
-        }
-        guard delegate.rootElement != nil else { throw FeedAdapterError.malformedFeed }
-        return delegate.makeFeed()
+    public enum SubscriptionDocument: Equatable, Sendable {
+        case feed(ParsedFeed)
+        case opml([OpmlFeed])
     }
 
-    // MARK: - OPML parsing
+    /// Select the parser by the XML root, not text in a comment or description.
+    public static func parseSubscriptionDocument(_ data: Data) throws -> SubscriptionDocument {
+        let input = try XMLInput(data, malformed: .malformedFeed)
+        if input.rootName == "opml" { return .opml(try parse(input, with: OPMLParserDelegate()).feeds) }
+        return .feed(try parse(input, with: FeedParserDelegate()).makeFeed())
+    }
+
+    public static func parseFeed(_ data: Data) throws -> ParsedFeed {
+        try parse(XMLInput(data, malformed: .malformedFeed), with: FeedParserDelegate()).makeFeed()
+    }
 
     public static func parseOPML(_ data: Data) throws -> [OpmlFeed] {
-        try XMLInput.check(data, malformed: .malformedOPML)
-        let delegate = OPMLParserDelegate()
-        let parser = XMLInput.parser(for: data)
+        try parse(XMLInput(data, malformed: .malformedOPML), with: OPMLParserDelegate()).feeds
+    }
+
+    private static func parse<Delegate: SecureXMLDelegate>(_ input: XMLInput, with delegate: Delegate) throws -> Delegate {
+        let parser = XMLParser(data: input.data)
+        // External DTDs/entities are never resolved; delegate callbacks are a second barrier.
+        parser.shouldResolveExternalEntities = false
+        parser.externalEntityResolvingPolicy = .never
         parser.delegate = delegate
-        guard parser.parse(), delegate.failure == nil else {
-            throw delegate.failure ?? FeedAdapterError.malformedOPML
+        guard parser.parse(), delegate.failure == nil, delegate.rootElement != nil else {
+            throw delegate.failure ?? delegate.parseError
         }
-        guard delegate.rootElement != nil else { throw FeedAdapterError.malformedOPML }
-        return delegate.feeds
+        return delegate
     }
 }
 
 // MARK: - XML hardening
 
-private enum XMLInput {
-    static let maximumBytes = 4 * 1024 * 1024
+private struct XMLInput {
+    private static let declarationStart = try! NSRegularExpression(pattern: #"\A<\?xml[ \t\r\n]"#)
+    private static let declaration = try! NSRegularExpression(pattern:
+        #"\A<\?xml[ \t\r\n]+version[ \t\r\n]*=[ \t\r\n]*(['"])1\.[0-9]+\1(?:[ \t\r\n]+encoding[ \t\r\n]*=[ \t\r\n]*(['"])([A-Za-z][A-Za-z0-9._-]*)\2)?(?:[ \t\r\n]+standalone[ \t\r\n]*=[ \t\r\n]*(['"])(?:yes|no)\4)?[ \t\r\n]*\?>"#)
+    private static let nameEnd = CharacterSet(charactersIn: " \t\r\n/>")
+    let data: Data
+    let rootName: String?
 
-    static func check(_ data: Data, malformed: FeedAdapterError) throws {
-        guard data.count <= maximumBytes else {
-            throw FeedAdapterError.inputTooLarge
+    init(_ source: Data, malformed: FeedAdapterError) throws {
+        guard source.count <= 4 * 1024 * 1024 else { throw FeedAdapterError.inputTooLarge }
+        var text = try Self.decode(source, malformed: malformed)
+        let range = NSRange(text.startIndex..., in: text)
+        if Self.declarationStart.firstMatch(in: text, range: range) != nil {
+            guard let declaration = Self.declaration.firstMatch(in: text, range: range) else { throw malformed }
+            if let encoding = Range(declaration.range(at: 3), in: text) {
+                // XMLParser must consume the same characters checked below.
+                text.replaceSubrange(encoding, with: "UTF-8")
+            }
         }
-        let text = String(decoding: data, as: UTF8.self).uppercased()
-        guard !text.contains("<!DOCTYPE"), !text.contains("<!ENTITY") else {
-            throw FeedAdapterError.externalEntityForbidden
-        }
+        rootName = try Self.scan(text as NSString, malformed: malformed)
+        data = Data(text.utf8)
     }
 
-    static func parser(for data: Data) -> XMLParser {
-        let parser = XMLParser(data: data)
-        // External DTDs/entities are never resolved; delegate callbacks are a second barrier.
-        parser.shouldResolveExternalEntities = false
-        return parser
+    private static func decode(_ data: Data, malformed: FeedAdapterError) throws -> String {
+        let prefix = Array(data.prefix(4))
+        let encoding: String.Encoding
+        if prefix.starts(with: [0, 0, 0xFE, 0xFF]) || prefix.starts(with: [0, 0, 0]) {
+            encoding = .utf32BigEndian
+        } else if prefix.starts(with: [0xFF, 0xFE, 0, 0]) || prefix.suffix(3).elementsEqual([0, 0, 0]) {
+            encoding = .utf32LittleEndian
+        } else if prefix.starts(with: [0xFE, 0xFF]) || prefix.first == 0 {
+            encoding = .utf16BigEndian
+        } else if prefix.starts(with: [0xFF, 0xFE]) || (prefix.count >= 2 && prefix[1] == 0) {
+            encoding = .utf16LittleEndian
+        } else if !prefix.starts(with: [0xEF, 0xBB, 0xBF]), data.starts(with: "<?xml".utf8),
+                  let end = data.range(of: Data("?>".utf8)),
+                  let head = String(data: data[..<end.upperBound], encoding: .ascii),
+                  let match = declaration.firstMatch(in: head, range: NSRange(head.startIndex..., in: head)),
+                  let range = Range(match.range(at: 3), in: head) {
+            let cfEncoding = CFStringConvertIANACharSetNameToEncoding(String(head[range]) as CFString)
+            guard cfEncoding != kCFStringEncodingInvalidId else { throw malformed }
+            encoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cfEncoding))
+        } else {
+            encoding = .utf8
+        }
+        guard var text = String(data: data, encoding: encoding) else { throw malformed }
+        if text.unicodeScalars.first?.value == 0xFEFF { text.unicodeScalars.removeFirst() }
+        return text
+    }
+
+    private static func scan(_ text: NSString, malformed: FeedAdapterError) throws -> String? {
+        var next = 0
+        var root: String?
+        while next < text.length {
+            let start = text.range(of: "<", options: .literal,
+                                   range: NSRange(location: next, length: text.length - next)).location
+            guard start != NSNotFound else { break }
+            let remaining = NSRange(location: start, length: text.length - start)
+            func starts(_ token: String, options: NSString.CompareOptions = []) -> Bool {
+                text.range(of: token, options: options.union([.anchored, .literal]), range: remaining).location == start
+            }
+            if starts("<!DOCTYPE", options: .caseInsensitive) || starts("<!ENTITY", options: .caseInsensitive) {
+                throw FeedAdapterError.externalEntityForbidden
+            }
+            let section: (opening: Int, closing: String)?
+            if starts("<!--") { section = (4, "-->") }
+            else if starts("<?") { section = (2, "?>") }
+            else if starts("<![CDATA[") { section = (9, "]]>") }
+            else { section = nil }
+            if let section {
+                let content = start + section.opening
+                let end = text.range(of: section.closing, options: .literal,
+                                     range: NSRange(location: content, length: text.length - content))
+                guard end.location != NSNotFound else { throw malformed }
+                next = NSMaxRange(end)
+            } else {
+                next = start + 1
+                if root == nil {
+                    let range = NSRange(location: next, length: text.length - next)
+                    let end = text.rangeOfCharacter(from: nameEnd, options: .literal, range: range).location
+                    if end != NSNotFound {
+                        root = SecureXMLDelegate.localName(text.substring(with: NSRange(location: next, length: end - next)))
+                    }
+                }
+            }
+        }
+        return root
     }
 }
 
@@ -645,6 +724,10 @@ private class SecureXMLDelegate: NSObject, XMLParserDelegate, @unchecked Sendabl
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
         appendText(string)
+    }
+
+    func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
+        if let text = String(data: CDATABlock, encoding: .utf8) { appendText(text) }
     }
 
     func parser(_ parser: XMLParser, foundExternalEntityDeclarationWithName name: String,

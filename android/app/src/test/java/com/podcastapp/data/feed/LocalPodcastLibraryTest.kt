@@ -2,9 +2,15 @@ package com.podcastapp.data.feed
 
 import com.podcastapp.data.remote.SettingsDto
 import java.io.File
+import java.net.InetAddress
 import java.nio.file.Files
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.tls.HandshakeCertificates
+import okhttp3.tls.HeldCertificate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -68,6 +74,43 @@ class LocalPodcastLibraryTest {
             assertEquals(imported.id, library.feeds.value.single().id)
         }
         assertTrue(File(dir, "local_podcast_library.json").exists())
+    }
+
+    @Test fun anonymousHttpsRssOnExplicitPortImportsAndReloadsEpisode() {
+        val dir = tempDir()
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("127.0.0.1").build()
+        val tls = HandshakeCertificates.Builder().heldCertificate(certificate).build()
+        val imported = MockWebServer().use { server ->
+            server.useHttps(tls.sslSocketFactory(), false)
+            server.start(InetAddress.getByName("127.0.0.1"), 0)
+            val origin = "https://127.0.0.1:${server.port}"
+            val feedUrl = "$origin/feed.xml"
+            val audioUrl = "$origin/episode.mp3"
+            server.enqueue(MockResponse()
+                .setHeader("Content-Type", "application/rss+xml; charset=utf-8")
+                .setBody(rss("Loopback podcast", "Loopback episode", audio = audioUrl)))
+            val library = LocalPodcastLibrary(dir, LocalPodcastLibrary.Companion::fetchHttpText, store(), 1)
+            val feed = runBlocking {
+                library.`import`(feedUrl, transport = SourceTransport(
+                    requireHttps = true, customCaPem = certificate.certificatePem(),
+                )).getOrThrow().single()
+            }
+            val request = checkNotNull(server.takeRequest(5, TimeUnit.SECONDS))
+            assertEquals("GET", request.method)
+            assertEquals("/feed.xml", request.path)
+            assertEquals(null, request.getHeader("Authorization"))
+            assertEquals(null, request.getHeader("Cookie"))
+            assertEquals(feedUrl, feed.feedUrl)
+            assertEquals(audioUrl, feed.episodes.single().audioUrl)
+            feed
+        }
+        assertEquals("Loopback podcast", imported.podcast.title)
+        assertTrue(imported.podcast.subscribed)
+        val episode = imported.episodes.single()
+        assertEquals("Loopback episode", episode.title)
+        assertEquals("ep-1", episode.guid)
+        val reloaded = library(dir) { error("Reload should not fetch $it") }.feeds.value.single()
+        assertEquals(imported, reloaded)
     }
 
     @Test fun reimportAndRefreshKeepStableLocalIdAndUpdateContent() {
