@@ -38,4 +38,3 @@ jobs:
           name: android-4.0-legacy-preview
           path: output/legacy/podcast-lite-api14-preview.apk
           if-no-files-found: error
-    39
