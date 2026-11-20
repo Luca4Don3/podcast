@@ -5,8 +5,15 @@ shopt -s nullglob
 sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?Set ANDROID_SDK_ROOT or ANDROID_HOME}}"
 bin="$sdk/build-tools/35.0.0"
 packages=(android/legacy/build/outputs/apk/debug/*-debug.apk)
-if [[ "${#packages[@]}" != 1 ]]; then printf 'Expected exactly one APK\n' >&2; exit 1; fi
-apk="${packages[0]}"
+if [[ -n "${LEGACY_APK:-}" ]]; then
+  apk="${LEGACY_APK}"
+elif [[ "${#packages[@]}" == 1 ]]; then
+  apk="${packages[0]}"
+else
+  printf 'Expected exactly one APK or LEGACY_APK\n' >&2
+  exit 1
+fi
+test -f "$apk" || { printf 'Missing APK: %s\n' "$apk" >&2; exit 1; }
 
 metadata=$("$bin/aapt" dump badging "$apk")
 printf '%s\n' "$metadata" | awk '/^package: |^sdkVersion: |^targetSdkVersion: |^launchable-activity: /'
@@ -35,5 +42,8 @@ with zipfile.ZipFile(apk) as package:
 print(f'APK size: {apk.stat().st_size:,} bytes (single DEX, no native libraries)')
 PY
 mkdir -p output/legacy
-cp -- "$apk" output/legacy/podcast-lite-api14-preview.apk
-sha256sum -- output/legacy/podcast-lite-api14-preview.apk
+output=output/legacy/podcast-lite-api14-preview.apk
+if [[ "$(cd "$(dirname "$apk")" && pwd)/$(basename "$apk")" != "$(cd "$(dirname "$output")" && pwd)/$(basename "$output")" ]]; then
+  cp -- "$apk" "$output"
+fi
+sha256sum -- "$output"

@@ -15,6 +15,11 @@
 使用 JDK 17 或 21、Android SDK Platform 35 和 Build Tools 35.0.0。在仓库根目录执行：
 
 ```sh
+# Preferred: SDK-only build against the real Android 4.0 API stubs.
+bash tests/build-android-legacy-direct.sh
+LEGACY_APK=output/legacy/podcast-lite-api14-preview.apk bash tests/verify-android-legacy-apk.sh
+
+# Optional Gradle path (requires Maven repositories and their rate limits):
 bash android/gradlew -p android/legacy --no-daemon lintDebug assembleDebug
 bash tests/verify-android-legacy-apk.sh
 ```

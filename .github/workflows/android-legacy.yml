@@ -32,12 +32,31 @@ jobs:
           java-version: '21'
       - name: Prepare Android build tools
         run: |
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-35" "build-tools;35.0.0"
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-14" "platforms;android-35" "build-tools;35.0.0"
       - name: Test feed parsing on the host JVM
         run: bash tests/test-android-legacy-feed.sh
       - name: Check Android 4.0 API usage and build preview
-        run: bash android/gradlew -p android/legacy --no-daemon lintDebug assembleDebug
+        env:
+          GRADLE_OPTS: '-Dorg.gradle.internal.http.connectionTimeout=30000 -Dorg.gradle.internal.http.socketTimeout=30000'
+        run: |
+          status=0
+          for attempt in 1 2 3; do
+            if bash android/gradlew -p android/legacy --no-daemon lintDebug assembleDebug; then
+              status=0
+              break
+            fi
+            status=$?
+            if [[ "$attempt" -eq 3 ]]; then break; fi
+            printf 'Gradle dependency download failed; retrying in 30s...\n'
+            sleep 30
+          done
+          # The SDK-toolchain build has no Maven dependency and also compiles
+          # against the real Android 4.0 API stubs.
+          bash tests/build-android-legacy-direct.sh
+          exit "$status"
       - name: Verify manifest, DEX and Android 4.0 signature
+        env:
+          LEGACY_APK: output/legacy/podcast-lite-api14-preview.apk
         run: bash tests/verify-android-legacy-apk.sh
       - uses: actions/upload-artifact@v4
         with:
