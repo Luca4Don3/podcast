@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <objbase.h>
 #include <algorithm>
 #include <atomic>
 #include <fstream>

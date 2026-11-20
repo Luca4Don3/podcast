@@ -1,19 +1,17 @@
-# Windows W1 本机资料库原型
+# Windows 原生预览版
 
-纯 C++17 + Win32 原生控件 + C++/WinRT（仅系统媒体播放器），无 Electron、无 WebView2、无 Windows App SDK、无后端。x64 与 ARM64 双架构均已通过 CI 编译与测试。
+C++17、Win32 系统控件和 Windows MediaPlayer；不需要账号、播客服务端、Electron 或 Windows App SDK。
 
-## 已实现
+## 使用
 
-- 三栏界面：订阅列表、单集列表、播放队列；订阅地址输入框与「添加订阅」「刷新」按钮。
-- RSS 2.0 / Atom 抓取与解析，受限 XML 扫描（拒绝 DTD/实体，防 XXE）；OPML 解析核心与单元测试。
-- 本机资料库存于 %LOCALAPPDATA%/Podcast，原子写入；订阅、单集、进度、队列重启后保留。
-- 队列「下一集播放/加入队尾」规则由共享 C++ 核心管理，支持上移、下移、移除；双击单集播放。
-- 保留 W0 的本地文件与公开 http(s) URL 播放、播放/暂停/停止/跳转/倍速、系统媒体会话。
+1. 在订阅地址栏粘贴公开 RSS/Atom 地址并点「添加订阅」，或选择「导入 OPML」打开本地文件。网络检查在后台执行，可取消；刷新失败不会用空结果替换旧订阅。单个 XML 限 4 MiB，OPML 最多 100 条带订阅地址的项目。
+2. 选中订阅后选择单集，「播放单集」或双击播放；也可直接打开本地文件或加载公开 HTTP(S) 音频。
+3. 用「移到队首」「加入队尾」管理待播，可手动播放、上移、下移或移除。编辑时不会切换当前媒体；队列顺序保存在本机。当前不自动连播。
 
 ## 构建与验证
 
-用 MSVC 与 Windows SDK 的 CMake 配置 windows/（-A x64 或 -A ARM64），Release 构建后运行 ctest。CI 已跑 5 项测试：缓存、共享核心、订阅解析、本机存储、启动冒烟，全部通过；两个架构各自上传产物。
+用 MSVC 和 Windows SDK 配置 CMake：x64 用 `-A x64`，ARM64 用 `-A ARM64`，构建 Release 后运行 CTest。[Windows 工作流](<../.github/workflows/windows.yml>) 分别检查 runner 架构、EXE 的 PE Machine、运行测试并上传 `windows-x64` 和 `windows-arm64`。
 
 ## 边界
 
-尚未接入：OPML 导入界面、离线缓存界面、断点续播的完整 UI（进度已存但未在重启后自动定位）、系统媒体键实测、签名安装包、混合 DPI 与无障碍实测。ARM64 为交叉编译，未上真实 ARM64 设备。后续见 docs/WINDOWS_CLIENT.md。
+仍是未签名预览版。尚未接入四档自动离线缓存和断点续播；媒体键、真实 Windows 设备的播放、DPI 和性能仍待人工验收。详情见 [Windows 桌面路线](<../docs/WINDOWS_CLIENT.md>)。
