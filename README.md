@@ -1,6 +1,6 @@
-# podcast（纯客户端）
+# podcast
 
-参考 Apple Podcasts 的信息架构与交互，面向 Android、iPhone/iPad、Windows、Linux 和 macOS 的纯客户端播客接收与播放应用。应用直接读取公开 RSS/Atom、OPML 和平台分享链接；**不要求自建后端或应用账号，也不作为播客分发平台**。来源级能力按平台分别实现与验收。
+参考 Apple Podcasts 的信息架构与交互，面向 Android、iPhone/iPad、Windows、Linux 和 macOS 的播客接收与播放应用。应用直接读取公开 RSS/Atom、OPML 和平台分享链接；**不要求自建后端或应用账号，也不作为播客分发平台**。来源级能力按平台分别实现与验收。
 
 公开仓库：<https://github.com/Luca4Don3/podcast>。当前开发版本：1.9.1（Android/iOS 客户端版本；桌面和 Android 4.0 兼容包是独立预览，尚未进入正式 Release）。
 

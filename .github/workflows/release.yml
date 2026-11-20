@@ -139,4 +139,4 @@ jobs:
           if [[ "$version" == *-rc* ]]; then flags+=(--prerelease); fi
           gh release create "$tag" assets/* --verify-tag "${flags[@]}" \
             --title "podcast $version" \
-            --notes "Client-only build: Android phone/tablet APK (CI test signing) and iPhone/iPad simulator app (not a device IPA). The app receives public podcast feeds and platform share links; no self-hosted server is required. Desktop clients are not included."
+            --notes "Podcast client build: Android phone/tablet APK (CI test signing) and iPhone/iPad simulator app (not a device IPA). The app receives public podcast feeds and platform share links; no self-hosted server is required. Desktop clients are not included."

@@ -1,6 +1,6 @@
 # Windows 桌面版路线
 
-状态：已有可构建的 [Windows 原生预览版](<../windows/README.md>)。不是发布版：没有签名安装包、真机播放验收、完整自动下载与混合 DPI 实测。Windows 是独立的纯客户端，不复用历史后端进程，也不要求注册。优先 Windows 11（仍在支持周期内的版本）、原生 x64 与 ARM64；不把 Windows App SDK 的 API 下限当成应用已支持的系统版本。
+状态：已有可构建的 [Windows 原生预览版](<../windows/README.md>)。不是发布版：没有签名安装包、真机播放验收、完整自动下载与混合 DPI 实测。Windows 是独立的客户端，不复用历史后端进程，也不要求注册。优先 Windows 11（仍在支持周期内的版本）、原生 x64 与 ARM64；不把 Windows App SDK 的 API 下限当成应用已支持的系统版本。
 
 ## 技术选择
 

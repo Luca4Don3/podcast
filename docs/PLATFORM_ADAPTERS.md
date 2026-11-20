@@ -22,7 +22,7 @@
 - **飞连**：独立的「飞连企业网络（WebDAV）」来源，使用飞连客户端或企业 MDM 已下发的系统路由。从输入的企业 WebDAV 地址执行只读试连（PROPFIND Depth:0），不自动跳转；分别提示登录页或非 WebDAV、需要来源自己的凭据、权限拒绝、响应异常等。试连不保存配置。它检测的是目标服务，不是 VPN 是否启用，也不收集飞连密码、读浏览器 Cookie、建立 VPN 或绕开企业策略。仅浏览器可用的[应用网关](https://docs.volcengine.com/docs/feilian/application-gateway-overview)不等于存在原生 WebDAV 地址。
 - **OneDrive**：独立来源，使用 Microsoft [设备码 OAuth](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code)和 [Graph 文件接口](https://learn.microsoft.com/en-us/graph/api/driveitem-get-content?view=graph-rest-1.0)。授权时去微软页面输入设备码；App 不接收微软账号密码。支持只读目录浏览和选择音频。令牌留在本次应用会话，不保存下载地址，也不向媒体 CDN 发送 Graph 令牌。
 - **阿里云盘个人版**：已核实[Android 官方 SDK](https://github.com/alibaba/aliyunpan-android-sdk)与 [iOS 官方 SDK](https://alibaba.github.io/aliyunpan-ios-sdk/)都提供公开客户端 PKCE 路径。它与阿里云 PDS 是不同产品；本次没有接入 SDK，不把官方可适配写成已实现。
-- **百度网盘**：[设备码授权](https://pan.baidu.com/union/doc/使用入门/接入授权/设备码模式授权/)获取设备码与兑换令牌的条件不同；兑换和刷新需要 SecretKey，不能打包进纯客户端。未接入。
+- **百度网盘**：[设备码授权](https://pan.baidu.com/union/doc/使用入门/接入授权/设备码模式授权/)获取设备码与兑换令牌的条件不同；兑换和刷新需要 SecretKey，不能打包进客户端。未接入。
 - **Google Drive**：优先评估 [drive.file 与 Picker](https://developers.google.com/workspace/drive/api/guides/api-specific-auth) 的按文件授权，不申请全盘权限；本次未实现。
 - **系统文件选择器**：Android SAF 与 Apple Files / 文档选择器是独立的系统提供者路径；本次不将它算作厂商登录适配。
 
