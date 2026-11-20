@@ -1,10 +1,10 @@
 # podcast（纯客户端）
 
-参考 Apple Podcasts 的信息架构与交互，面向 Android、iPhone 和 iPad 的播客接收与播放客户端。应用直接读取公开 RSS/Atom、OPML 和平台分享链接；**不再要求自建后端，也不作为播客分发平台**。
+参考 Apple Podcasts 的信息架构与交互，面向 Android、iPhone、iPad 和桌面的播客接收与播放客户端。应用直接读取公开 RSS/Atom、OPML 和平台分享链接；**不再要求自建后端，也不作为播客分发平台**。
 
 公开仓库：<https://github.com/Luca4Don3/podcast>。当前开发版本：1.9.1（client-only，尚未发布到 GitHub Release）。
 
-新版本 tag 仅构建 Android 手机／平板包和 iPhone／iPad 模拟器包；历史 Release 不覆盖。Apple 真机包仍需自己的签名。
+版本 tag 的正式发布仍仅构建 Android 手机／平板包和 iPhone／iPad 模拟器包；桌面预览通过独立工作流构建。历史 Release 不覆盖。Apple 真机包仍需自己的签名。
 
 ## 平台接入
 
@@ -47,4 +47,4 @@ podcastapp/
 ├── server/  server-cpp/  deploy/  # 历史自建后端，已退出构建和发布（源码删除待确认）
 ```
 
-多屏适配见 [Android 多屏适配](<docs/ANDROID_ADAPTIVE.md>) 与 [Apple 客户端](<docs/APPLE_CLIENT.md>)。
+多屏适配见 [Android 多屏适配](<docs/ANDROID_ADAPTIVE.md>) 与 [Apple 客户端](<docs/APPLE_CLIENT.md>)。后续开发见 [播客交互路线](<docs/PODCAST_UX_ROADMAP.md>) 与 [Windows 桌面路线](<docs/WINDOWS_CLIENT.md>)。Linux 和 macOS 的 ABI、编译与验收见 [桌面预览](<docs/DESKTOP_PREVIEW.md>)。
